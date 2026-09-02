@@ -8,7 +8,17 @@ const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
 
 app.use(express.json({ limit: '4mb' })); // frames are small (resized client-side) but leave headroom
-app.use(express.static(path.join(__dirname, 'public')));
+// Serve the app shell with revalidation rather than plain caching: phones in
+// the field kept running a stale app.js after a deploy, which made fixes look
+// like they hadn't shipped. etag is on by default, so a revalidated file that
+// hasn't changed still costs only a 304.
+app.use(express.static(path.join(__dirname, 'public'), {
+  setHeaders: (res, filePath) => {
+    if (/\.(html|js|css)$/.test(filePath)) {
+      res.setHeader('Cache-Control', 'no-cache');
+    }
+  },
+}));
 
 // ---------- Projects ----------
 async function loadProjectsWithStats(whereClause) {
