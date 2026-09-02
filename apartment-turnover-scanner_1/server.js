@@ -10,14 +10,83 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 
 app.use(express.json({ limit: '4mb' })); // frames are small (resized client-side) but leave headroom
 app.use(express.static(path.join(__dirname, 'public')));
 
+// ---------- Projects ----------
+app.get('/api/projects', async (req, res) => {
+  const projectsResult = await pool.query('SELECT id, name, created_at FROM projects ORDER BY created_at DESC');
+  const statsResult = await pool.query(`
+    SELECT u.project_id,
+           COUNT(DISTINCT u.id)::int AS total_units,
+           COUNT(DISTINCT u.id) FILTER (
+             WHERE i.id IS NOT NULL AND NOT EXISTS (
+               SELECT 1 FROM items i2 WHERE i2.unit_id = u.id AND i2.status <> 'done'
+             )
+           )::int AS complete_units,
+           COUNT(i.id)::int AS total_items,
+           COUNT(i.id) FILTER (WHERE i.status = 'done')::int AS done_items
+    FROM units u
+    LEFT JOIN items i ON i.unit_id = u.id
+    GROUP BY u.project_id
+  `);
+  const statsByProject = new Map(statsResult.rows.map((r) => [r.project_id, r]));
+
+  const projects = projectsResult.rows.map((p) => {
+    const s = statsByProject.get(p.id) || { total_units: 0, complete_units: 0, total_items: 0, done_items: 0 };
+    return {
+      id: p.id,
+      name: p.name,
+      createdAt: p.created_at,
+      totalUnits: s.total_units,
+      completeUnits: s.complete_units,
+      totalItems: s.total_items,
+      doneItems: s.done_items,
+    };
+  });
+
+  res.json({ projects });
+});
+
+app.post('/api/projects', async (req, res) => {
+  const name = String((req.body && req.body.name) || '').trim();
+  if (!name) return res.status(400).json({ error: 'Project name is required' });
+  const result = await pool.query('INSERT INTO projects (name) VALUES ($1) RETURNING id, name, created_at', [name]);
+  res.json({ project: result.rows[0] });
+});
+
+app.get('/api/projects/:id', async (req, res) => {
+  const result = await pool.query('SELECT id, name, created_at FROM projects WHERE id = $1', [req.params.id]);
+  if (!result.rows.length) return res.status(404).json({ error: 'Project not found' });
+  res.json({ project: result.rows[0] });
+});
+
+app.delete('/api/projects/:id', async (req, res) => {
+  const result = await pool.query('DELETE FROM projects WHERE id = $1 RETURNING id', [req.params.id]);
+  if (!result.rows.length) return res.status(404).json({ error: 'Project not found' });
+  res.json({ ok: true });
+});
+
 // ---------- Import ----------
-// Expects an .xlsx/.csv where column A is the unit number and the remaining
-// columns in that row list the appliances present in that unit (any number
-// of columns, blanks allowed). No fixed header required, but a first row
-// whose first cell reads like a label ("Unit", "Unit #", "Unit Number") is
-// skipped automatically.
+// Expects an .xlsx/.csv with the unit number in column A. The remaining
+// columns are handled two ways:
+//
+//  1. Fixed-checklist template (what most turnover lists look like): row 1
+//     is a header whose first cell reads like a label ("Unit", "Unit #",
+//     "Unit Number") and the other header cells name the appliance types
+//     (e.g. "Fridge", "Range", "Water Heater") that apply to EVERY unit.
+//     A unit's cell under a given column only needs to be filled in when
+//     that appliance should be EXCLUDED for that unit — write "N/A", "NA",
+//     "N/a", or "-" there and that item is skipped for that unit.
+//  2. No recognizable header: each row simply lists, in the columns after
+//     the unit number, the appliances present in THAT unit (free-form,
+//     can differ per row).
 app.post('/api/import', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+
+  const projectId = req.body && req.body.projectId ? parseInt(req.body.projectId, 10) : null;
+  const projectName = req.body && req.body.projectName ? String(req.body.projectName).trim() : '';
+
+  if (!projectId && !projectName) {
+    return res.status(400).json({ error: 'Provide a projectId to replace an existing project, or a projectName to create a new one.' });
+  }
 
   let workbook;
   try {
@@ -32,19 +101,34 @@ app.post('/api/import', upload.single('file'), async (req, res) => {
 
   if (!rows.length) return res.status(400).json({ error: 'The file appears to be empty.' });
 
+  const NOT_APPLICABLE = new Set(['n/a', 'na', '-', 'none', 'x']);
+
   let dataRows = rows;
+  let checklistColumns = null; // when set, these column headers apply to every unit
   const firstCell = String(rows[0][0] || '').trim().toLowerCase();
   if (['unit', 'unit #', 'unit number', 'unit no', 'unit no.'].includes(firstCell)) {
+    checklistColumns = rows[0].slice(1).map((c) => String(c || '').trim()).filter(Boolean);
     dataRows = rows.slice(1);
   }
 
   const parsedUnits = dataRows
     .map((row) => {
       const unitNumber = String(row[0] || '').trim();
-      const items = row
-        .slice(1)
-        .map((c) => String(c || '').trim())
-        .filter(Boolean);
+      let items;
+      if (checklistColumns && checklistColumns.length) {
+        // Fixed checklist: include every header column unless this unit's
+        // cell explicitly marks it not-applicable.
+        items = checklistColumns.filter((name, idx) => {
+          const cell = String(row[idx + 1] || '').trim().toLowerCase();
+          return !NOT_APPLICABLE.has(cell);
+        });
+      } else {
+        // Free-form: whatever's written in each cell is an item name.
+        items = row
+          .slice(1)
+          .map((c) => String(c || '').trim())
+          .filter(Boolean);
+      }
       return { unitNumber, items };
     })
     .filter((u) => u.unitNumber);
@@ -56,14 +140,23 @@ app.post('/api/import', upload.single('file'), async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    // Clear previous project data before loading the new one.
-    await client.query('DELETE FROM units');
+
+    let finalProjectId = projectId;
+    if (finalProjectId) {
+      const existing = await client.query('SELECT id FROM projects WHERE id = $1', [finalProjectId]);
+      if (!existing.rows.length) throw Object.assign(new Error('Project not found'), { httpStatus: 404 });
+      // Replacing this project's unit list.
+      await client.query('DELETE FROM units WHERE project_id = $1', [finalProjectId]);
+    } else {
+      const inserted = await client.query('INSERT INTO projects (name) VALUES ($1) RETURNING id', [projectName]);
+      finalProjectId = inserted.rows[0].id;
+    }
 
     for (let i = 0; i < parsedUnits.length; i++) {
       const { unitNumber, items } = parsedUnits[i];
       const unitResult = await client.query(
-        'INSERT INTO units (unit_number, sort_order) VALUES ($1, $2) RETURNING id',
-        [unitNumber, i]
+        'INSERT INTO units (project_id, unit_number, sort_order) VALUES ($1, $2, $3) RETURNING id',
+        [finalProjectId, unitNumber, i]
       );
       const unitId = unitResult.rows[0].id;
       for (let j = 0; j < items.length; j++) {
@@ -74,22 +167,32 @@ app.post('/api/import', upload.single('file'), async (req, res) => {
       }
     }
     await client.query('COMMIT');
+    res.json({ ok: true, projectId: finalProjectId, unitsImported: parsedUnits.length });
   } catch (e) {
     await client.query('ROLLBACK');
+    if (e.httpStatus === 404) return res.status(404).json({ error: e.message });
     console.error(e);
     return res.status(500).json({ error: 'Import failed while saving to the database.' });
   } finally {
     client.release();
   }
-
-  res.json({ ok: true, unitsImported: parsedUnits.length });
 });
 
-// ---------- Units / dashboard ----------
+// ---------- Units / dashboard (scoped to a project) ----------
 app.get('/api/units', async (req, res) => {
-  const unitsResult = await pool.query('SELECT id, unit_number FROM units ORDER BY sort_order ASC');
+  const projectId = req.query.projectId ? parseInt(req.query.projectId, 10) : null;
+  if (!projectId) return res.status(400).json({ error: 'projectId query param is required' });
+
+  const unitsResult = await pool.query(
+    'SELECT id, unit_number FROM units WHERE project_id = $1 ORDER BY sort_order ASC',
+    [projectId]
+  );
   const itemsResult = await pool.query(
-    'SELECT id, unit_id, name, model, serial, status, scanned_by, scanned_at FROM items ORDER BY unit_id, sort_order'
+    `SELECT i.id, i.unit_id, i.name, i.model, i.serial, i.status, i.scanned_by, i.scanned_at
+     FROM items i JOIN units u ON u.id = i.unit_id
+     WHERE u.project_id = $1
+     ORDER BY i.unit_id, i.sort_order`,
+    [projectId]
   );
 
   const itemsByUnit = new Map();
@@ -113,11 +216,11 @@ app.get('/api/units', async (req, res) => {
     };
   });
 
-  res.json({ units, hasProject: units.length > 0 });
+  res.json({ units });
 });
 
 app.get('/api/units/:id', async (req, res) => {
-  const unitResult = await pool.query('SELECT id, unit_number FROM units WHERE id = $1', [req.params.id]);
+  const unitResult = await pool.query('SELECT id, project_id, unit_number FROM units WHERE id = $1', [req.params.id]);
   if (!unitResult.rows.length) return res.status(404).json({ error: 'Unit not found' });
   const itemsResult = await pool.query(
     'SELECT id, name, model, serial, status, scanned_by, scanned_at FROM items WHERE unit_id = $1 ORDER BY sort_order',
@@ -154,19 +257,25 @@ app.patch('/api/items/:id', async (req, res) => {
 // server never receives camera images — only the confirmed model/serial
 // text, via the PATCH /api/items/:id route above.
 
-// ---------- Export ----------
-async function fetchExportRows() {
-  const result = await pool.query(`
+// ---------- Export (scoped to a project) ----------
+async function fetchExportRows(projectId) {
+  const result = await pool.query(
+    `
     SELECT u.unit_number, i.name, i.model, i.serial, i.status, i.scanned_by, i.scanned_at
     FROM units u
     JOIN items i ON i.unit_id = u.id
+    WHERE u.project_id = $1
     ORDER BY u.sort_order, i.sort_order
-  `);
+  `,
+    [projectId]
+  );
   return result.rows;
 }
 
 app.get('/api/export.csv', async (req, res) => {
-  const rows = await fetchExportRows();
+  const projectId = req.query.projectId ? parseInt(req.query.projectId, 10) : null;
+  if (!projectId) return res.status(400).json({ error: 'projectId query param is required' });
+  const rows = await fetchExportRows(projectId);
   const header = ['Unit', 'Item', 'Model', 'Serial', 'Status', 'Scanned By', 'Scanned At'];
   const csvEscape = (v) => {
     const s = v === null || v === undefined ? '' : String(v);
@@ -186,7 +295,9 @@ app.get('/api/export.csv', async (req, res) => {
 });
 
 app.get('/api/export.xlsx', async (req, res) => {
-  const rows = await fetchExportRows();
+  const projectId = req.query.projectId ? parseInt(req.query.projectId, 10) : null;
+  if (!projectId) return res.status(400).json({ error: 'projectId query param is required' });
+  const rows = await fetchExportRows(projectId);
   const data = rows.map((r) => ({
     Unit: r.unit_number,
     Item: r.name,
