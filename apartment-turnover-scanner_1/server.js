@@ -365,6 +365,81 @@ app.get('/api/export.xlsx', async (req, res) => {
   res.send(buffer);
 });
 
+// ---------------- Cloud OCR (optional) ----------------
+//
+// Reading appliance nameplates with in-browser OCR tops out at a few seconds
+// per scan and still misses plates that are plainly legible to a person. A
+// cloud vision service reads them in a fraction of that, so the app uses one
+// when a key is configured and silently falls back to on-device OCR when it
+// isn't — no key, no behaviour change, nothing to break on site.
+//
+// Set exactly one of these in the Render dashboard:
+//   GOOGLE_VISION_API_KEY  — best accuracy; 1,000 scans/month free
+//   OCR_SPACE_API_KEY      — 25,000 scans/month free, no card required
+const GOOGLE_VISION_API_KEY = process.env.GOOGLE_VISION_API_KEY;
+const OCR_SPACE_API_KEY = process.env.OCR_SPACE_API_KEY;
+
+function ocrProvider() {
+  if (GOOGLE_VISION_API_KEY) return 'google';
+  if (OCR_SPACE_API_KEY) return 'ocrspace';
+  return null;
+}
+
+app.get('/api/ocr/status', (req, res) => {
+  res.json({ available: !!ocrProvider(), provider: ocrProvider() });
+});
+
+app.post('/api/ocr', upload.single('image'), async (req, res) => {
+  const provider = ocrProvider();
+  if (!provider) return res.status(503).json({ error: 'Cloud OCR is not configured' });
+  if (!req.file) return res.status(400).json({ error: 'No image uploaded' });
+
+  const started = Date.now();
+  try {
+    const text = provider === 'google'
+      ? await readWithGoogleVision(req.file.buffer)
+      : await readWithOcrSpace(req.file.buffer);
+    res.json({ text, provider, ms: Date.now() - started });
+  } catch (e) {
+    // The client falls back to on-device OCR on any failure, so a flaky
+    // network or an exhausted quota degrades rather than blocks.
+    res.status(502).json({ error: e.message, provider });
+  }
+});
+
+async function readWithGoogleVision(buffer) {
+  const resp = await fetch(`https://vision.googleapis.com/v1/images:annotate?key=${GOOGLE_VISION_API_KEY}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      requests: [{
+        image: { content: buffer.toString('base64') },
+        features: [{ type: 'TEXT_DETECTION' }],
+      }],
+    }),
+  });
+  const json = await resp.json();
+  if (json.error) throw new Error(json.error.message || 'Vision API error');
+  const result = (json.responses && json.responses[0]) || {};
+  if (result.error) throw new Error(result.error.message || 'Vision API error');
+  return (result.fullTextAnnotation && result.fullTextAnnotation.text) || '';
+}
+
+async function readWithOcrSpace(buffer) {
+  const form = new FormData();
+  form.append('file', new Blob([buffer], { type: 'image/jpeg' }), 'label.jpg');
+  form.append('apikey', OCR_SPACE_API_KEY);
+  form.append('OCREngine', '2');
+  form.append('scale', 'true');
+
+  const resp = await fetch('https://api.ocr.space/parse/image', { method: 'POST', body: form });
+  const json = await resp.json();
+  if (json.IsErroredOnProcessing) {
+    throw new Error([].concat(json.ErrorMessage || 'OCR service error').join(' '));
+  }
+  return ((json.ParsedResults || [])[0] || {}).ParsedText || '';
+}
+
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 
 const PORT = process.env.PORT || 3000;
