@@ -565,7 +565,20 @@
   // alphanumeric codes if no label was recognized at all — the scan flow
   // always requires the user to review before confirming, so an imperfect
   // guess is safe and still faster than typing from scratch.
-  function parseModelSerial(text) {
+  // "ENL-50 120" -> "AAA-99 999". Letters and digits are generalised, and
+  // separators kept, so a shape describes a plate's format without pinning it
+  // to one particular unit's value.
+  function shapeOf(value) {
+    return String(value).replace(/[A-Za-z]/g, 'A').replace(/[0-9]/g, '9');
+  }
+
+  function matchesLearnedShape(value, shapes) {
+    if (!shapes || !shapes.length) return false;
+    return shapes.indexOf(shapeOf(value)) !== -1;
+  }
+
+  function parseModelSerial(text, learned) {
+    const shapes = learned || { model: [], serial: [] };
     const lines = text.split('\n').map((l) => l.replace(/\s+/g, ' ').trim()).filter(Boolean);
 
     // Words that appear ON nameplates but are never the code itself, so we
@@ -605,6 +618,24 @@
     }
 
     const tokensOf = (line) => line.split(/[\s,;]+/).map((t) => t.replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9\-\/]+$/g, '')).filter(Boolean);
+
+    // Picks the value following a label. Normally that's the first
+    // code-shaped token, but some plates print a value containing a space
+    // ("ENL-50 120"), which no amount of token-splitting recovers on its own.
+    // A learned shape for this field authorises joining the next tokens — and
+    // only a learned shape does, so nothing is glued together speculatively.
+    function pickValue(tokens, fieldShapes) {
+      for (let i = 0; i < tokens.length; i++) {
+        if (!isCode(tokens[i], { requireLetter: false })) continue;
+        for (let extra = 3; extra >= 1; extra--) {
+          if (i + extra >= tokens.length) continue;
+          const joined = tokens.slice(i, i + 1 + extra).join(' ');
+          if (matchesLearnedShape(joined, fieldShapes)) return joined;
+        }
+        return tokens[i];
+      }
+      return '';
+    }
 
     // Keyword positions. Matched loosely so English and French/Spanish
     // variants both hit: "Model No.", "No de Modele", "Modelo", "Serial No.",
@@ -698,21 +729,21 @@
         const firstIsModel = mIdx < sIdx;
         const segA = line.slice(first, Math.max(mIdx, sIdx));
         const segB = line.slice(Math.max(mIdx, sIdx));
-        const codesA = tokensOf(segA).filter((t) => isCode(t, { requireLetter: false }));
-        const codesB = tokensOf(segB).filter((t) => isCode(t, { requireLetter: false }));
+        const tokensA = tokensOf(segA);
+        const tokensB = tokensOf(segB);
         if (firstIsModel) {
-          if (!model && codesA.length) model = codesA[0];
-          if (!serial && codesB.length) serial = codesB[0];
+          if (!model) model = pickValue(tokensA, shapes.model) || model;
+          if (!serial) serial = pickValue(tokensB, shapes.serial) || serial;
         } else {
-          if (!serial && codesA.length) serial = codesA[0];
-          if (!model && codesB.length) model = codesB[0];
+          if (!serial) serial = pickValue(tokensA, shapes.serial) || serial;
+          if (!model) model = pickValue(tokensB, shapes.model) || model;
         }
         continue;
       }
 
-      const codes = tokensOf(line.slice(mIdx !== -1 ? mIdx : sIdx)).filter((t) => isCode(t, { requireLetter: false }));
-      if (mIdx !== -1 && !model && codes.length) model = codes[0];
-      if (sIdx !== -1 && !serial && codes.length) serial = codes[0];
+      const tail = tokensOf(line.slice(mIdx !== -1 ? mIdx : sIdx));
+      if (mIdx !== -1 && !model) model = pickValue(tail, shapes.model) || model;
+      if (sIdx !== -1 && !serial) serial = pickValue(tail, shapes.serial) || serial;
     }
 
     // Pass 2: stacked layouts, where the label is on its own line and the
@@ -743,9 +774,9 @@
           serial = nextCodes[0];
         }
       } else if (hasModel && !model) {
-        model = nextCodes[0];
+        model = pickValue(tokensOf(next), shapes.model) || nextCodes[0];
       } else if (hasSerial && !serial) {
-        serial = nextCodes[0];
+        serial = pickValue(tokensOf(next), shapes.serial) || nextCodes[0];
       }
     }
 
@@ -910,6 +941,9 @@
     // capture. "Fix MODEL"/"Fix SERIAL" aim it at a specific field, which is
     // what you want when a value came back wrong rather than missing.
     let fixTarget = null;
+    // What the reader proposed, so that a value the user changed by hand can
+    // be told apart from one they simply accepted.
+    const proposed = { model: '', serial: '' };
 
     function setFixTarget(target) {
       fixTarget = target;
@@ -990,8 +1024,8 @@
     });
 
     function applyGuess(guess, emptyMessage) {
-      if (guess.model) modelField.value = guess.model;
-      if (guess.serial) serialField.value = guess.serial;
+      if (guess.model) { modelField.value = guess.model; proposed.model = guess.model; }
+      if (guess.serial) { serialField.value = guess.serial; proposed.serial = guess.serial; }
 
       // Show where each value came from, so a wrong read is obvious at a
       // glance instead of being discovered later in the spreadsheet.
@@ -1013,14 +1047,31 @@
     });
 
     document.getElementById('confirmBtn').addEventListener('click', async () => {
-      await saveItem(item.id, {
-        model: modelField.value.trim(),
-        serial: serialField.value.trim(),
-        status: 'done',
-        scannedBy: scannedBy(),
-      });
+      const model = modelField.value.trim();
+      const serial = serialField.value.trim();
+      await saveItem(item.id, { model, serial, status: 'done', scannedBy: scannedBy() });
+      // Learn from what the user actually confirmed. A value they corrected
+      // teaches the most, but an accepted one is worth recording too — it is
+      // confirmation that this shape is what this appliance's plate looks
+      // like, which is what lets a later ambiguous read be settled.
+      learnFromConfirmation(item.name, 'model', model, proposed.model);
+      learnFromConfirmation(item.name, 'serial', serial, proposed.serial);
       flashGreen(() => goToNext());
     });
+
+    function learnFromConfirmation(itemName, field, value, proposedValue) {
+      if (!value || value.length < 3) return;
+      const shape = shapeOf(value);
+      // Ignore shapes that describe nothing useful (a bare word, say) — they
+      // would match half the plate and make later reads worse, not better.
+      if (!/9/.test(shape) || shape.length < 4) return;
+      // Fire and forget: learning must never delay the crew moving on, and a
+      // failure here costs nothing but a missed lesson.
+      api('/api/patterns', {
+        method: 'POST',
+        body: JSON.stringify({ itemName, field, shape, sample: value }),
+      }).catch(() => {});
+    }
 
     function goToNext() {
       cleanup();
@@ -1047,8 +1098,10 @@
       }
     }
 
-    // Warm the OCR engine up while the user is framing their shot.
+    // Warm the OCR engine up, and load anything already learned about this
+    // appliance's plate format, while the user is framing their shot.
     ensureWorker().catch(() => {});
+    loadLearnedShapes(item.name);
   }
 
   // A small on-screen copy of the captured photo.
@@ -1163,7 +1216,7 @@
     const resp = await fetch('/api/ocr', { method: 'POST', body: form });
     if (!resp.ok) throw new Error(`cloud OCR failed (${resp.status})`);
     const data = await resp.json();
-    const guess = parseModelSerial(data.text || '');
+    const guess = parseModelSerial(data.text || '', learnedShapes);
     // Keep the word positions (and the size they are relative to) so the app
     // can show which part of the photo each value was read from.
     guess.words = data.words || [];
@@ -1176,19 +1229,54 @@
   // image, so a box can be drawn over it at any display size.
   function locateValue(value, words, sw, sh) {
     if (!value || !words || !words.length || !sw || !sh) return null;
-    const target = value.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+    const norm = (t) => (t || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+    const target = norm(value);
+    if (!target) return null;
+
+    const boxOf = (list) => {
+      const left = Math.min(...list.map((w) => w.left));
+      const top = Math.min(...list.map((w) => w.top));
+      const right = Math.max(...list.map((w) => w.left + w.width));
+      const bottom = Math.max(...list.map((w) => w.top + w.height));
+      return { left: left / sw, top: top / sh, width: (right - left) / sw, height: (bottom - top) / sh };
+    };
+
+    // Exact single word.
     for (const w of words) {
-      const t = (w.text || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
-      if (t && (t === target || t.includes(target) || target.includes(t))) {
-        return {
-          left: w.left / sw,
-          top: w.top / sh,
-          width: w.width / sw,
-          height: w.height / sh,
-        };
+      if (norm(w.text) === target) return boxOf([w]);
+    }
+
+    // A value split across consecutive words ("ENL-50 120" read as two).
+    // Only words on roughly the same line are joined, so the box can't stretch
+    // across unrelated parts of the plate.
+    for (let i = 0; i < words.length; i++) {
+      let joined = norm(words[i].text);
+      if (!joined) continue;
+      const group = [words[i]];
+      for (let j = i + 1; j < words.length && j < i + 4; j++) {
+        const sameLine = Math.abs(words[j].top - words[i].top) <= Math.max(words[i].height, 1) * 0.6;
+        if (!sameLine) break;
+        joined += norm(words[j].text);
+        group.push(words[j]);
+        if (joined === target) return boxOf(group);
+        if (joined.length > target.length) break;
       }
     }
-    return null;
+
+    // Partial match, but only when the word is most of the value. Without
+    // this floor a stray "1" on the plate matches a 13-digit serial, and the
+    // box lands on unrelated text — which is worse than showing no box,
+    // because it looks like a confident answer.
+    let best = null;
+    for (const w of words) {
+      const t = norm(w.text);
+      if (!t || t.length < 4) continue;
+      const contained = target.includes(t) || t.includes(target);
+      if (!contained) continue;
+      const overlap = Math.min(t.length, target.length) / Math.max(t.length, target.length);
+      if (overlap >= 0.6 && (!best || overlap > best.overlap)) best = { w, overlap };
+    }
+    return best ? boxOf([best.w]) : null;
   }
 
   // Runs OCR over one image, fastest-and-most-likely configuration first.
@@ -1203,6 +1291,18 @@
     { longEdge: 2400, rendition: 'plain', psm: '3' },
     { longEdge: 2400, rendition: 'centre', psm: '3' },
   ];
+
+  // Shapes learned for the appliance currently being scanned.
+  let learnedShapes = { model: [], serial: [] };
+
+  async function loadLearnedShapes(itemName) {
+    try {
+      const data = await api(`/api/patterns?itemName=${encodeURIComponent(itemName)}`);
+      learnedShapes = data.patterns || { model: [], serial: [] };
+    } catch (e) {
+      learnedShapes = { model: [], serial: [] };
+    }
+  }
 
   async function readLabelFromCanvas(source, onProgress) {
     const guess = { model: '', serial: '' };
@@ -1236,7 +1336,7 @@
 
       await tesseractWorker.setParameters({ tessedit_pageseg_mode: tier.psm });
       const { data } = await tesseractWorker.recognize(canvas);
-      const pass = parseModelSerial(data.text || '');
+      const pass = parseModelSerial(data.text || '', learnedShapes);
       const words = data.words || [];
       // A value is only accepted if Tesseract was actually confident about the
       // characters it read. Without this gate a garbled pass can hand back
