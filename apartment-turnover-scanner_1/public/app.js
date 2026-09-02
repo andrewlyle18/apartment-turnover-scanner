@@ -34,23 +34,12 @@
   }
 
   // ---------------- Router ----------------
-  let state = { units: [], hasProject: false };
   let pollTimer = null;
 
-  async function loadUnits() {
-    const data = await api('/api/units');
-    state.units = data.units;
-    state.hasProject = data.hasProject;
-    return data;
-  }
-
-  function startPolling(renderFn) {
+  function startPolling(fn) {
     stopPolling();
     pollTimer = setInterval(async () => {
-      try {
-        await loadUnits();
-        renderFn();
-      } catch (e) { /* ignore transient poll errors */ }
+      try { await fn(); } catch (e) { /* ignore transient poll errors */ }
     }, 5000);
   }
   function stopPolling() {
@@ -67,54 +56,147 @@
   async function route() {
     stopPolling();
     const hash = window.location.hash.slice(1);
-    try {
-      await loadUnits();
-    } catch (e) {
-      root.innerHTML = `<div class="card"><p class="help">Could not reach the server: ${e.message}</p></div>`;
-      return;
-    }
-
-    if (!state.hasProject) {
-      renderImport();
-      return;
-    }
 
     if (!hash || hash === '/') {
-      renderDashboard();
+      renderProjects();
       return;
     }
 
-    const unitMatch = hash.match(/^\/unit\/(\d+)$/);
+    const projectMatch = hash.match(/^\/project\/(\d+)$/);
+    if (projectMatch) {
+      renderDashboard(parseInt(projectMatch[1], 10));
+      return;
+    }
+
+    const unitMatch = hash.match(/^\/project\/(\d+)\/unit\/(\d+)$/);
     if (unitMatch) {
-      const unit = state.units.find((u) => String(u.id) === unitMatch[1]);
-      if (!unit) { navigate(''); return; }
-      renderUnit(unit);
+      renderUnit(parseInt(unitMatch[1], 10), parseInt(unitMatch[2], 10));
       return;
     }
 
-    const scanMatch = hash.match(/^\/unit\/(\d+)\/scan\/(\d+)$/);
+    const scanMatch = hash.match(/^\/project\/(\d+)\/unit\/(\d+)\/scan\/(\d+)$/);
     if (scanMatch) {
-      const unit = state.units.find((u) => String(u.id) === scanMatch[1]);
-      if (!unit) { navigate(''); return; }
-      const itemIndex = parseInt(scanMatch[2], 10);
-      renderScan(unit, itemIndex);
+      renderScan(parseInt(scanMatch[1], 10), parseInt(scanMatch[2], 10), parseInt(scanMatch[3], 10));
       return;
     }
 
     navigate('');
   }
 
-  // ---------------- Import view ----------------
-  function renderImport() {
+  // ---------------- Projects (cover page) ----------------
+  async function renderProjects() {
+    root.innerHTML = `<div class="card"><p class="help">Loading projects...</p></div>`;
+    let data;
+    try {
+      data = await api('/api/projects');
+    } catch (e) {
+      root.innerHTML = `<div class="card"><p class="help">Could not reach the server: ${e.message}</p></div>`;
+      return;
+    }
+
+    const projects = data.projects;
+
     root.innerHTML = `
+      <div class="row between">
+        <h1>Projects</h1>
+      </div>
       <div class="card">
-        <h1>Load your unit list</h1>
+        <div class="unit-grid" id="projectGrid"></div>
+        ${projects.length === 0 ? '<p class="help">No projects yet — create your first one below.</p>' : ''}
+      </div>
+      <div class="card">
+        <h2>Start a new project</h2>
+        <p class="help">Give this job a name, then upload its unit list (.xlsx or .csv). Column A should have the unit number and the columns after it list the appliances — either the same fixed checklist for every unit (header row names the appliance types) or a custom list per unit.</p>
+        <div class="row" style="margin-top:8px;">
+          <input type="text" id="newProjectName" placeholder="Project name (e.g. Maple Ridge Apartments)" />
+        </div>
+        <div class="row" style="margin-top:10px;">
+          <input type="file" id="importFile" accept=".xlsx,.xls,.csv" />
+        </div>
+        <div class="row" style="margin-top:12px;">
+          <button class="primary" id="createProjectBtn">Create project</button>
+        </div>
+        <div id="importMsg" style="margin-top:10px;"></div>
+      </div>
+    `;
+
+    const grid = document.getElementById('projectGrid');
+    grid.innerHTML = projects.map((p) => `
+      <button class="unit-tile ${p.totalUnits > 0 && p.completeUnits === p.totalUnits ? 'complete' : (p.doneItems > 0 ? 'inprogress' : '')}" data-id="${p.id}">
+        ${p.totalUnits > 0 && p.completeUnits === p.totalUnits ? '<div class="check">&#10003;</div>' : ''}
+        <div class="unit-num">${escapeHtml(p.name)}</div>
+        <div class="unit-progress">${p.completeUnits}/${p.totalUnits} units</div>
+      </button>
+    `).join('');
+    grid.querySelectorAll('.unit-tile').forEach((el) => {
+      el.addEventListener('click', () => navigate(`/project/${el.dataset.id}`));
+    });
+
+    document.getElementById('createProjectBtn').addEventListener('click', async () => {
+      const nameInput = document.getElementById('newProjectName');
+      const fileInput = document.getElementById('importFile');
+      const msg = document.getElementById('importMsg');
+      const name = nameInput.value.trim();
+      if (!name) { msg.textContent = 'Give the project a name.'; return; }
+      if (!fileInput.files.length) { msg.textContent = 'Choose a unit-list file first.'; return; }
+      msg.textContent = 'Importing...';
+      const formData = new FormData();
+      formData.append('file', fileInput.files[0]);
+      formData.append('projectName', name);
+      try {
+        const resp = await fetch('/api/import', { method: 'POST', body: formData });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Import failed');
+        toast(`Created "${name}" with ${data.unitsImported} units`);
+        navigate(`/project/${data.projectId}`);
+      } catch (e) {
+        msg.textContent = e.message;
+      }
+    });
+  }
+
+  // ---------------- Dashboard (one project) ----------------
+  async function renderDashboard(projectId) {
+    root.innerHTML = `<div class="card"><p class="help">Loading...</p></div>`;
+    let project, units;
+    try {
+      [project, units] = await Promise.all([
+        api(`/api/projects/${projectId}`).then((d) => d.project),
+        api(`/api/units?projectId=${projectId}`).then((d) => d.units),
+      ]);
+    } catch (e) {
+      root.innerHTML = `<div class="card"><p class="help">Could not load this project: ${e.message}</p></div>`;
+      return;
+    }
+
+    if (units.length === 0) {
+      renderImportIntoProject(project);
+      return;
+    }
+
+    drawDashboard(project, units);
+    startPolling(async () => {
+      const fresh = await api(`/api/units?projectId=${projectId}`).then((d) => d.units);
+      const searchBox = document.getElementById('searchBox');
+      const currentFilter = searchBox ? searchBox.value : '';
+      updateDashboardStats(fresh);
+      renderUnitGrid(fresh, currentFilter);
+    });
+  }
+
+  function renderImportIntoProject(project) {
+    root.innerHTML = `
+      <div class="row between">
+        <h1>${escapeHtml(project.name)}</h1>
+        <button class="secondary" id="allProjectsBtn">&larr; All projects</button>
+      </div>
+      <div class="card">
+        <h2>Load the unit list</h2>
         <p class="help">
           Upload an Excel (.xlsx) or CSV file. Column A should have the unit number
-          (e.g. 101, 102, 214) and the columns after it should list the appliances
-          in that unit &mdash; e.g. Refrigerator, Range, Microwave, Dishwasher, Disposal,
-          Washer, Dryer, Water Heater, Air Handler. Every unit can have a different
-          list. A header row is optional.
+          and the columns after it list the appliances &mdash; either a fixed checklist
+          (header row names the appliance types, applied to every unit) or a custom
+          list per unit.
         </p>
         <input type="file" id="importFile" accept=".xlsx,.xls,.csv" />
         <div class="row" style="margin-top:12px;">
@@ -123,6 +205,7 @@
         <div id="importMsg" style="margin-top:10px;"></div>
       </div>
     `;
+    document.getElementById('allProjectsBtn').addEventListener('click', () => navigate(''));
     document.getElementById('importBtn').addEventListener('click', async () => {
       const fileInput = document.getElementById('importFile');
       const msg = document.getElementById('importMsg');
@@ -130,12 +213,12 @@
       msg.textContent = 'Importing...';
       const formData = new FormData();
       formData.append('file', fileInput.files[0]);
+      formData.append('projectId', project.id);
       try {
         const resp = await fetch('/api/import', { method: 'POST', body: formData });
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.error || 'Import failed');
         toast(`Imported ${data.unitsImported} units`);
-        navigate('');
         route();
       } catch (e) {
         msg.textContent = e.message;
@@ -143,17 +226,46 @@
     });
   }
 
-  // ---------------- Dashboard ----------------
-  function renderDashboard() {
-    const totalUnits = state.units.length;
-    const completeUnits = state.units.filter((u) => u.complete).length;
-    const totalItems = state.units.reduce((s, u) => s + u.totalItems, 0);
-    const doneItems = state.units.reduce((s, u) => s + u.doneItems, 0);
+  function updateDashboardStats(units) {
+    const totalUnits = units.length;
+    const completeUnits = units.filter((u) => u.complete).length;
+    const totalItems = units.reduce((s, u) => s + u.totalItems, 0);
+    const doneItems = units.reduce((s, u) => s + u.doneItems, 0);
+    const statsEls = document.querySelectorAll('.stat .num');
+    if (statsEls[0]) statsEls[0].textContent = `${completeUnits}/${totalUnits}`;
+    if (statsEls[1]) statsEls[1].textContent = `${doneItems}/${totalItems}`;
+  }
+
+  function renderUnitGrid(units, filter) {
+    const grid = document.getElementById('unitGrid');
+    if (!grid) return;
+    const f = (filter || '').trim().toLowerCase();
+    const filtered = units.filter((u) => !f || u.unitNumber.toLowerCase().includes(f));
+    grid.innerHTML = filtered.map((u) => `
+      <button class="unit-tile ${u.complete ? 'complete' : (u.inProgress ? 'inprogress' : '')}" data-id="${u.id}">
+        ${u.complete ? '<div class="check">&#10003;</div>' : ''}
+        <div class="unit-num">${escapeHtml(u.unitNumber)}</div>
+        <div class="unit-progress">${u.doneItems}/${u.totalItems}</div>
+      </button>
+    `).join('') || '<p class="help">No units match.</p>';
+
+    grid.querySelectorAll('.unit-tile').forEach((el) => {
+      const projectId = grid.dataset.projectId;
+      el.addEventListener('click', () => navigate(`/project/${projectId}/unit/${el.dataset.id}`));
+    });
+  }
+
+  function drawDashboard(project, units) {
+    const totalUnits = units.length;
+    const completeUnits = units.filter((u) => u.complete).length;
+    const totalItems = units.reduce((s, u) => s + u.totalItems, 0);
+    const doneItems = units.reduce((s, u) => s + u.doneItems, 0);
 
     root.innerHTML = `
       <div class="row between">
-        <h1>Units</h1>
+        <h1>${escapeHtml(project.name)}</h1>
         <div class="row">
+          <button class="secondary" id="allProjectsBtn">&larr; All projects</button>
           <button class="secondary" id="reimportBtn">Re-import list</button>
         </div>
       </div>
@@ -165,60 +277,41 @@
         <div class="row">
           <input type="text" id="searchBox" placeholder="Search unit number..." />
         </div>
-        <div class="unit-grid" id="unitGrid"></div>
+        <div class="unit-grid" id="unitGrid" data-project-id="${project.id}"></div>
       </div>
       <div class="card">
         <h2>Export</h2>
         <div class="row">
-          <a href="/api/export.xlsx"><button class="primary">Download Excel</button></a>
-          <a href="/api/export.csv"><button class="secondary">Download CSV</button></a>
+          <a href="/api/export.xlsx?projectId=${project.id}"><button class="primary">Download Excel</button></a>
+          <a href="/api/export.csv?projectId=${project.id}"><button class="secondary">Download CSV</button></a>
         </div>
       </div>
     `;
 
-    function renderGrid(filter) {
-      const grid = document.getElementById('unitGrid');
-      const f = (filter || '').trim().toLowerCase();
-      const units = state.units.filter((u) => !f || u.unitNumber.toLowerCase().includes(f));
-      grid.innerHTML = units.map((u) => `
-        <button class="unit-tile ${u.complete ? 'complete' : (u.inProgress ? 'inprogress' : '')}" data-id="${u.id}">
-          ${u.complete ? '<div class="check">&#10003;</div>' : ''}
-          <div class="unit-num">${escapeHtml(u.unitNumber)}</div>
-          <div class="unit-progress">${u.doneItems}/${u.totalItems}</div>
-        </button>
-      `).join('') || '<p class="help">No units match.</p>';
-
-      grid.querySelectorAll('.unit-tile').forEach((el) => {
-        el.addEventListener('click', () => navigate(`/unit/${el.dataset.id}`));
-      });
-    }
-
-    renderGrid('');
-    document.getElementById('searchBox').addEventListener('input', (e) => renderGrid(e.target.value));
+    renderUnitGrid(units, '');
+    document.getElementById('searchBox').addEventListener('input', (e) => renderUnitGrid(units, e.target.value));
+    document.getElementById('allProjectsBtn').addEventListener('click', () => navigate(''));
     document.getElementById('reimportBtn').addEventListener('click', () => {
-      if (confirm('This replaces the current unit list and all progress. Continue?')) {
-        state.hasProject = false;
-        renderImport();
+      if (confirm('This replaces the current unit list and all progress for this project. Continue?')) {
+        renderImportIntoProject(project);
       }
-    });
-
-    startPolling(() => {
-      // Re-render grid preserving current search text.
-      const searchBox = document.getElementById('searchBox');
-      const currentFilter = searchBox ? searchBox.value : '';
-      const totalUnits2 = state.units.length;
-      const completeUnits2 = state.units.filter((u) => u.complete).length;
-      const totalItems2 = state.units.reduce((s, u) => s + u.totalItems, 0);
-      const doneItems2 = state.units.reduce((s, u) => s + u.doneItems, 0);
-      const statsEls = document.querySelectorAll('.stat .num');
-      if (statsEls[0]) statsEls[0].textContent = `${completeUnits2}/${totalUnits2}`;
-      if (statsEls[1]) statsEls[1].textContent = `${doneItems2}/${totalItems2}`;
-      renderGrid(currentFilter);
     });
   }
 
   // ---------------- Unit detail ----------------
-  function renderUnit(unit) {
+  async function renderUnit(projectId, unitId) {
+    root.innerHTML = `<div class="card"><p class="help">Loading...</p></div>`;
+    let unit;
+    try {
+      const data = await api(`/api/units/${unitId}`);
+      unit = { id: data.unit.id, unitNumber: data.unit.unit_number, items: data.items };
+    } catch (e) {
+      root.innerHTML = `<div class="card"><p class="help">Could not load this unit: ${e.message}</p></div>`;
+      return;
+    }
+    const doneItems = unit.items.filter((i) => i.status === 'done').length;
+    const complete = unit.items.length > 0 && doneItems === unit.items.length;
+
     root.innerHTML = `
       <div class="row between">
         <h1>Unit ${escapeHtml(unit.unitNumber)}</h1>
@@ -226,17 +319,17 @@
       </div>
       <div class="card">
         <div class="row between" style="margin-bottom:10px;">
-          <div>${unit.doneItems}/${unit.totalItems} scanned</div>
-          <button class="primary" id="startScanBtn" ${unit.totalItems === 0 ? 'disabled' : ''}>
-            ${unit.complete ? 'Re-scan / review' : 'Start scanning'}
+          <div>${doneItems}/${unit.items.length} scanned</div>
+          <button class="primary" id="startScanBtn" ${unit.items.length === 0 ? 'disabled' : ''}>
+            ${complete ? 'Re-scan / review' : 'Start scanning'}
           </button>
         </div>
         <div id="itemList"></div>
       </div>
-      ${unit.complete ? `<div class="card big-check"><div class="mark">&#10003;</div><div>Unit ${escapeHtml(unit.unitNumber)} complete</div></div>` : ''}
+      ${complete ? `<div class="card big-check"><div class="mark">&#10003;</div><div>Unit ${escapeHtml(unit.unitNumber)} complete</div></div>` : ''}
     `;
 
-    document.getElementById('backBtn').addEventListener('click', () => navigate(''));
+    document.getElementById('backBtn').addEventListener('click', () => navigate(`/project/${projectId}`));
 
     const list = document.getElementById('itemList');
     list.innerHTML = unit.items.map((item, idx) => `
@@ -250,12 +343,12 @@
     `).join('') || '<p class="help">No items listed for this unit.</p>';
 
     list.querySelectorAll('.item-row').forEach((el) => {
-      el.addEventListener('click', () => navigate(`/unit/${unit.id}/scan/${el.dataset.idx}`));
+      el.addEventListener('click', () => navigate(`/project/${projectId}/unit/${unitId}/scan/${el.dataset.idx}`));
     });
 
     document.getElementById('startScanBtn').addEventListener('click', () => {
       const firstPending = unit.items.findIndex((i) => i.status !== 'done');
-      navigate(`/unit/${unit.id}/scan/${firstPending === -1 ? 0 : firstPending}`);
+      navigate(`/project/${projectId}/unit/${unitId}/scan/${firstPending === -1 ? 0 : firstPending}`);
     });
   }
 
@@ -294,10 +387,20 @@
     return { model, serial, rawText: lines.join(' | ') };
   }
 
-  function renderScan(unit, itemIndex) {
-    const items = unit.items;
+  async function renderScan(projectId, unitId, itemIndex) {
+    root.innerHTML = `<div class="card"><p class="help">Loading...</p></div>`;
+    let unitNumber, items;
+    try {
+      const data = await api(`/api/units/${unitId}`);
+      unitNumber = data.unit.unit_number;
+      items = data.items;
+    } catch (e) {
+      root.innerHTML = `<div class="card"><p class="help">Could not load this unit: ${e.message}</p></div>`;
+      return;
+    }
+
     if (itemIndex >= items.length) {
-      renderUnitCompleteScreen(unit);
+      renderUnitCompleteScreen(projectId, unitId, unitNumber);
       return;
     }
     const item = items[itemIndex];
@@ -310,7 +413,7 @@
           <div class="scan-flash" id="scanFlash"></div>
           <div class="scan-banner">
             <div class="item-target">${escapeHtml(item.name)}</div>
-            <div class="progress">Item ${itemIndex + 1} of ${items.length} &middot; Unit ${escapeHtml(unit.unitNumber)}</div>
+            <div class="progress">Item ${itemIndex + 1} of ${items.length} &middot; Unit ${escapeHtml(unitNumber)}</div>
           </div>
           <div class="scan-status" id="scanStatus">Line up the label in the box, then tap Capture</div>
         </div>
@@ -354,7 +457,7 @@
     document.getElementById('exitScan').addEventListener('click', (e) => {
       e.preventDefault();
       cleanup();
-      navigate(`/unit/${unit.id}`);
+      navigate(`/project/${projectId}/unit/${unitId}`);
     });
 
     captureBtn.addEventListener('click', async () => {
@@ -396,7 +499,7 @@
 
     function goToNext() {
       cleanup();
-      navigate(`/unit/${unit.id}/scan/${itemIndex + 1}`);
+      navigate(`/project/${projectId}/unit/${unitId}/scan/${itemIndex + 1}`);
     }
 
     function flashGreen(after) {
@@ -470,17 +573,17 @@
     return canvas;
   }
 
-  function renderUnitCompleteScreen(unit) {
+  function renderUnitCompleteScreen(projectId, unitId, unitNumber) {
     root.innerHTML = `
       <div class="card big-check">
         <div class="mark">&#10003;</div>
-        <div>Unit ${escapeHtml(unit.unitNumber)} complete</div>
+        <div>Unit ${escapeHtml(unitNumber)} complete</div>
         <div class="row" style="justify-content:center;margin-top:14px;">
-          <button class="primary" id="doneBtn">Back to all units</button>
+          <button class="primary" id="doneBtn">Back to unit list</button>
         </div>
       </div>
     `;
-    document.getElementById('doneBtn').addEventListener('click', () => navigate(''));
+    document.getElementById('doneBtn').addEventListener('click', () => navigate(`/project/${projectId}`));
   }
 
   function escapeHtml(str) {
