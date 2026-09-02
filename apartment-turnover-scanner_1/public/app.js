@@ -538,12 +538,19 @@
   async function ensureWorker() {
     if (workerReady) return tesseractWorker;
     if (typeof Tesseract === 'undefined') throw new Error('OCR engine failed to load');
-    tesseractWorker = await Tesseract.createWorker('eng');
+    // Prefer the "best" (slower, markedly more accurate) LSTM model — worth
+    // it on worn and dot-matrix nameplates. It's a larger one-time download
+    // that the browser then caches, so fall back to the default model if it
+    // can't be fetched (bad signal on site) rather than failing the scan.
+    try {
+      tesseractWorker = await Tesseract.createWorker('eng', 1, {
+        langPath: 'https://tessdata.projectnaptha.com/4.0.0_best',
+      });
+    } catch (e) {
+      tesseractWorker = await Tesseract.createWorker('eng');
+    }
     await tesseractWorker.setParameters({
       tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-/.: ',
-      // Automatic page segmentation: we now hand Tesseract the whole visible
-      // frame rather than a tight crop, so let it find the text blocks
-      // itself instead of assuming one uniform block.
       tessedit_pageseg_mode: '3',
     });
     workerReady = true;
@@ -815,15 +822,24 @@
       statusEl.textContent = 'Reading label...';
       try {
         await ensureWorker();
-        const renditions = captureFrame(video);
 
-        // Read the adaptive rendition first (it handles the widest range of
-        // lighting), and only pay for a second pass on the plain grayscale if
-        // that didn't produce both fields. Whichever pass finds a field wins,
-        // so the two together cover far more plates than either alone.
+        // Grab a short burst and keep the sharpest frame — handheld shots in
+        // a unit are often slightly motion-blurred, and blur costs more
+        // accuracy than anything else we can control here.
+        const base = await captureSharpestFrame(video, 3);
+
+        // Then work through renditions of that frame from most to least
+        // likely to succeed, stopping as soon as both fields are found. Each
+        // rendition fails differently, so a plate that defeats one is
+        // usually readable by the next — that's what makes this hold up on
+        // labels we've never seen, instead of only the ones we tuned for.
         let guess = { model: '', serial: '' };
-        for (const rendition of [renditions.adaptive, renditions.plain]) {
-          const { data } = await tesseractWorker.recognize(rendition);
+        const attempts = buildOcrAttempts(base);
+        for (let i = 0; i < attempts.length; i++) {
+          const attempt = attempts[i];
+          if (i > 0) statusEl.textContent = `Reading label... (pass ${i + 1})`;
+          await tesseractWorker.setParameters({ tessedit_pageseg_mode: attempt.psm });
+          const { data } = await tesseractWorker.recognize(attempt.canvas);
           const pass = parseModelSerial(data.text || '');
           if (!guess.model && pass.model) guess.model = pass.model;
           if (!guess.serial && pass.serial) guess.serial = pass.serial;
@@ -940,9 +956,9 @@
     const cropW = cw / scale;
     const cropH = ch / scale;
 
-    // Upscale small frames — Tesseract is markedly more accurate when
-    // character height is generous, and this is a one-shot capture so we
-    // can afford the pixels. Cap the long edge so OCR stays responsive.
+    // Upscale small frames — Tesseract needs generous character height, and
+    // nameplate text is small within a full frame. Cap the long edge so OCR
+    // stays responsive on a phone.
     let outScale = 1;
     const longEdge = Math.max(cropW, cropH);
     if (longEdge < 2200) outScale = 2200 / longEdge;
@@ -955,25 +971,76 @@
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, canvas.width, canvas.height);
 
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const w = canvas.width, h = canvas.height;
-    const d = imageData.data;
+    const d = ctx.getImageData(0, 0, w, h).data;
     const gray = new Uint8ClampedArray(w * h);
     for (let i = 0, p = 0; i < d.length; i += 4, p++) {
       gray[p] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
     }
+    return { gray, w, h };
+  }
 
-    return {
-      // Plain grayscale. Best on evenly lit, high-contrast plates.
-      plain: grayToCanvas(gray, w, h),
-      // Locally thresholded. Essential when the plate is a bright patch in a
-      // dark scene (a label on a black appliance, a lit sticker inside a dim
-      // cabinet): Tesseract picks a single global threshold for the image, so
-      // a dark surround drags that threshold down and washes the label out.
-      // Comparing each pixel to the average of its own neighbourhood instead
-      // makes the read independent of what surrounds the label.
-      adaptive: grayToCanvas(adaptiveThreshold(gray, w, h), w, h),
-    };
+  // Mean absolute gradient — a blurred frame has softer edges, so this is a
+  // decent proxy for "which of these shots is in focus".
+  function frameSharpness(frame) {
+    const { gray, w, h } = frame;
+    let sum = 0, n = 0;
+    const step = 4; // sampling is plenty for a relative comparison
+    for (let y = step; y < h; y += step) {
+      for (let x = step; x < w; x += step) {
+        const i = y * w + x;
+        sum += Math.abs(gray[i] - gray[i - step]) + Math.abs(gray[i] - gray[i - step * w]);
+        n++;
+      }
+    }
+    return n ? sum / n : 0;
+  }
+
+  function captureSharpestFrame(video, count) {
+    return new Promise((resolve) => {
+      const frames = [];
+      const grab = () => {
+        frames.push(captureFrame(video));
+        if (frames.length >= count) {
+          frames.sort((a, b) => frameSharpness(b) - frameSharpness(a));
+          resolve(frames[0]);
+        } else {
+          setTimeout(grab, 90);
+        }
+      };
+      grab();
+    });
+  }
+
+  // Builds the ordered list of OCR attempts for one captured frame. Ordering
+  // is from evidence on real nameplate photos: the adaptive rendition reads
+  // the widest range of plates, and a centre zoom rescues labels that are
+  // small in the frame. We stop at the first attempt that yields both fields,
+  // so a clean plate still costs a single pass.
+  function buildOcrAttempts(frame) {
+    const { gray, w, h } = frame;
+    const adaptive = grayToCanvas(adaptiveThreshold(gray, w, h), w, h);
+    const plain = grayToCanvas(gray, w, h);
+
+    // Centre region, re-thresholded on its own so the surrounding scene can't
+    // influence it, and scaled up for more pixels per character.
+    const cx0 = Math.round(w * 0.05), cx1 = Math.round(w * 0.95);
+    const cy0 = Math.round(h * 0.25), cy1 = Math.round(h * 0.85);
+    const cwid = cx1 - cx0, chei = cy1 - cy0;
+    const centreGray = new Uint8ClampedArray(cwid * chei);
+    for (let y = 0; y < chei; y++) {
+      for (let x = 0; x < cwid; x++) {
+        centreGray[y * cwid + x] = gray[(y + cy0) * w + (x + cx0)];
+      }
+    }
+    const centre = grayToCanvas(adaptiveThreshold(centreGray, cwid, chei), cwid, chei);
+
+    return [
+      { canvas: adaptive, psm: '6' },
+      { canvas: adaptive, psm: '3' },
+      { canvas: centre, psm: '3' },
+      { canvas: plain, psm: '6' },
+    ];
   }
 
   function grayToCanvas(gray, w, h) {
