@@ -587,8 +587,60 @@
     // Keyword positions. Matched loosely so English and French/Spanish
     // variants both hit: "Model No.", "No de Modele", "Modelo", "Serial No.",
     // "No de Serie", "S/N".
-    const MODEL_KW = /\b(model|modelo|modele|modell|mdl|mod)\b|\bmodele\b/i;
-    const SERIAL_KW = /\b(serial|serie|series|s\/n|sn)\b/i;
+    // Label detection is fuzzy on purpose. OCR routinely mangles the label
+    // words themselves on glossy or dot-matrix plates ("Serial" comes back as
+    // "Senal", "Model" as "Modei"), and a strict word list would then miss a
+    // value that is otherwise perfectly readable. We accept any word within a
+    // small edit distance of a known label word, so the parser keeps working
+    // on plates it has never seen.
+    function editDistance(a, b) {
+      const m = a.length, n = b.length;
+      let prev = new Array(n + 1);
+      for (let j = 0; j <= n; j++) prev[j] = j;
+      for (let i = 1; i <= m; i++) {
+        const cur = [i];
+        for (let j = 1; j <= n; j++) {
+          cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+        }
+        prev = cur;
+      }
+      return prev[n];
+    }
+
+    const MODEL_WORDS = ['model', 'modelo', 'modele', 'modell', 'modelnr', 'mdl'];
+    const SERIAL_WORDS = ['serial', 'serie', 'series', 'serien', 'seriennr'];
+
+    function fuzzyMatches(word, targets) {
+      const w = word.toLowerCase().replace(/[^a-z]/g, '');
+      if (!w) return false;
+      for (const t of targets) {
+        if (w === t) return true;
+        // Allow one substitution on short words, two on longer ones — enough
+        // for typical OCR letter confusion without matching unrelated words.
+        const budget = t.length >= 6 ? 2 : 1;
+        if (Math.abs(w.length - t.length) <= budget && editDistance(w, t) <= budget) return true;
+      }
+      return false;
+    }
+
+    // Character offset of the first word in `line` that reads as a model /
+    // serial label, or -1. Also catches the abbreviations that are too short
+    // for fuzzy matching to handle safely.
+    function labelIndex(line, targets, abbrevRe) {
+      if (abbrevRe) {
+        const m = line.match(abbrevRe);
+        if (m) return m.index;
+      }
+      const re = /[A-Za-z][A-Za-z.]*/g;
+      let m;
+      while ((m = re.exec(line)) !== null) {
+        if (fuzzyMatches(m[0], targets)) return m.index;
+      }
+      return -1;
+    }
+
+    const modelIndex = (line) => labelIndex(line, MODEL_WORDS, /\bmdl\b|\bmod\.?\s*no\b/i);
+    const serialIndex = (line) => labelIndex(line, SERIAL_WORDS, /\bs\/?n\b|\bser\.?\s*no\b/i);
 
     let model = '';
     let serial = '';
@@ -599,8 +651,8 @@
     // and "MODEL ABC123 SERIAL XYZ789" alike, without caring what
     // punctuation or second-language text sits between label and value.
     for (const line of lines) {
-      const mIdx = line.search(MODEL_KW);
-      const sIdx = line.search(SERIAL_KW);
+      const mIdx = modelIndex(line);
+      const sIdx = serialIndex(line);
       if (mIdx === -1 && sIdx === -1) continue;
 
       // If both labels are on one line, each label owns the codes that
@@ -634,8 +686,8 @@
       const line = lines[i];
       const next = lines[i + 1];
       if (!next) break;
-      const hasModel = MODEL_KW.test(line);
-      const hasSerial = SERIAL_KW.test(line);
+      const hasModel = modelIndex(line) !== -1;
+      const hasSerial = serialIndex(line) !== -1;
       if (!hasModel && !hasSerial) continue;
       // Only treat it as a stacked label if this line carries no value of
       // its own (otherwise pass 1 already handled it).
@@ -645,7 +697,7 @@
       if (!nextCodes.length) continue;
 
       if (hasModel && hasSerial) {
-        const modelFirst = line.search(MODEL_KW) < line.search(SERIAL_KW);
+        const modelFirst = modelIndex(line) < serialIndex(line);
         if (nextCodes.length >= 2) {
           if (!model) model = modelFirst ? nextCodes[0] : nextCodes[1];
           if (!serial) serial = modelFirst ? nextCodes[1] : nextCodes[0];
@@ -763,9 +815,21 @@
       statusEl.textContent = 'Reading label...';
       try {
         await ensureWorker();
-        const stillCanvas = captureFrame(video);
-        const { data } = await tesseractWorker.recognize(stillCanvas);
-        const guess = parseModelSerial(data.text || '');
+        const renditions = captureFrame(video);
+
+        // Read the adaptive rendition first (it handles the widest range of
+        // lighting), and only pay for a second pass on the plain grayscale if
+        // that didn't produce both fields. Whichever pass finds a field wins,
+        // so the two together cover far more plates than either alone.
+        let guess = { model: '', serial: '' };
+        for (const rendition of [renditions.adaptive, renditions.plain]) {
+          const { data } = await tesseractWorker.recognize(rendition);
+          const pass = parseModelSerial(data.text || '');
+          if (!guess.model && pass.model) guess.model = pass.model;
+          if (!guess.serial && pass.serial) guess.serial = pass.serial;
+          if (guess.model && guess.serial) break;
+        }
+
         if (guess.model) modelField.value = guess.model;
         if (guess.serial) serialField.value = guess.serial;
         if (!guess.model && !guess.serial) {
@@ -823,7 +887,11 @@
     async function startCamera() {
       try {
         stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+          // Ask for as much sensor resolution as the phone will give us —
+          // nameplate text is small within the frame, and pixels on the label
+          // are the single biggest factor in whether OCR can read it. Phones
+          // that can't do this fall back to whatever they support.
+          video: { facingMode: { ideal: 'environment' }, width: { ideal: 3840 }, height: { ideal: 2160 } },
           audio: false,
         });
         if (destroyed) { stream.getTracks().forEach((t) => t.stop()); return; }
@@ -877,8 +945,8 @@
     // can afford the pixels. Cap the long edge so OCR stays responsive.
     let outScale = 1;
     const longEdge = Math.max(cropW, cropH);
-    if (longEdge < 1600) outScale = 1600 / longEdge;
-    if (longEdge * outScale > 2400) outScale = 2400 / longEdge;
+    if (longEdge < 2200) outScale = 2200 / longEdge;
+    if (longEdge * outScale > 2600) outScale = 2600 / longEdge;
 
     const canvas = document.createElement('canvas');
     canvas.width = Math.round(cropW * outScale);
@@ -887,16 +955,70 @@
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, canvas.width, canvas.height);
 
-    // Grayscale + contrast boost to help OCR on embossed/dot-matrix nameplates.
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const w = canvas.width, h = canvas.height;
     const d = imageData.data;
-    for (let i = 0; i < d.length; i += 4) {
-      const gray = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-      const contrasted = Math.min(255, Math.max(0, (gray - 128) * 1.6 + 128));
-      d[i] = d[i + 1] = d[i + 2] = contrasted;
+    const gray = new Uint8ClampedArray(w * h);
+    for (let i = 0, p = 0; i < d.length; i += 4, p++) {
+      gray[p] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
     }
-    ctx.putImageData(imageData, 0, 0);
+
+    return {
+      // Plain grayscale. Best on evenly lit, high-contrast plates.
+      plain: grayToCanvas(gray, w, h),
+      // Locally thresholded. Essential when the plate is a bright patch in a
+      // dark scene (a label on a black appliance, a lit sticker inside a dim
+      // cabinet): Tesseract picks a single global threshold for the image, so
+      // a dark surround drags that threshold down and washes the label out.
+      // Comparing each pixel to the average of its own neighbourhood instead
+      // makes the read independent of what surrounds the label.
+      adaptive: grayToCanvas(adaptiveThreshold(gray, w, h), w, h),
+    };
+  }
+
+  function grayToCanvas(gray, w, h) {
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    const out = ctx.createImageData(w, h);
+    for (let p = 0, i = 0; p < gray.length; p++, i += 4) {
+      out.data[i] = out.data[i + 1] = out.data[i + 2] = gray[p];
+      out.data[i + 3] = 255;
+    }
+    ctx.putImageData(out, 0, 0);
     return canvas;
+  }
+
+  // Adaptive (local mean) threshold via a summed-area table, so the cost is
+  // one pass regardless of window size. Integer sums stay well inside Uint32
+  // range for any canvas we produce here.
+  function adaptiveThreshold(gray, w, h) {
+    const iw = w + 1;
+    const ii = new Uint32Array(iw * (h + 1));
+    for (let y = 0; y < h; y++) {
+      let rowSum = 0;
+      for (let x = 0; x < w; x++) {
+        rowSum += gray[y * w + x];
+        ii[(y + 1) * iw + (x + 1)] = ii[y * iw + (x + 1)] + rowSum;
+      }
+    }
+
+    // Window ~6% of the short edge: comfortably larger than a character, small
+    // enough to track uneven lighting across the plate.
+    const radius = Math.max(7, Math.round(Math.min(w, h) * 0.03));
+    const bias = 8; // keeps faint paper texture from turning into speckle
+    const out = new Uint8ClampedArray(w * h);
+    for (let y = 0; y < h; y++) {
+      const y0 = Math.max(0, y - radius), y1 = Math.min(h, y + radius + 1);
+      for (let x = 0; x < w; x++) {
+        const x0 = Math.max(0, x - radius), x1 = Math.min(w, x + radius + 1);
+        const area = (y1 - y0) * (x1 - x0);
+        const sum = ii[y1 * iw + x1] - ii[y0 * iw + x1] - ii[y1 * iw + x0] + ii[y0 * iw + x0];
+        out[y * w + x] = gray[y * w + x] > sum / area - bias ? 255 : 0;
+      }
+    }
+    return out;
   }
 
   function renderUnitCompleteScreen(projectId, unitId, unitNumber) {
