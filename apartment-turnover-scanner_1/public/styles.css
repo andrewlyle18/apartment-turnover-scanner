@@ -352,3 +352,9 @@ input[type="text"], input[type="file"] {
 .fix-bar-buttons { display: flex; gap: 8px; }
 .fix-bar-buttons button { padding: 7px 12px; font-size: 13px; }
 .fix-bar-buttons button.armed { background: var(--green); color: white; }
+
+/* Building / floor breadcrumbs */
+.crumbs { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 12px; font-size: 13px; }
+.crumb { color: #4a6fa5; text-decoration: none; }
+.crumb.current { color: #555; font-weight: 600; }
+.crumb-sep { color: #b6bac1; }

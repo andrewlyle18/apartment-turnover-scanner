@@ -129,6 +129,21 @@
       return;
     }
 
+    // Building, then floor. A unit number encodes both: 1202 is building 1,
+    // floor 2 — so the drill-down needs no extra data, just the numbers the
+    // crew already uses.
+    const buildingMatch = hash.match(/^\/project\/(\d+)\/b\/([^/]+)$/);
+    if (buildingMatch) {
+      renderDashboard(parseInt(buildingMatch[1], 10), decodeURIComponent(buildingMatch[2]));
+      return;
+    }
+
+    const floorMatch = hash.match(/^\/project\/(\d+)\/b\/([^/]+)\/f\/([^/]+)$/);
+    if (floorMatch) {
+      renderDashboard(parseInt(floorMatch[1], 10), decodeURIComponent(floorMatch[2]), decodeURIComponent(floorMatch[3]));
+      return;
+    }
+
     const unitMatch = hash.match(/^\/project\/(\d+)\/unit\/(\d+)$/);
     if (unitMatch) {
       renderUnit(parseInt(unitMatch[1], 10), parseInt(unitMatch[2], 10));
@@ -320,7 +335,7 @@
   }
 
   // ---------------- Dashboard (one project) ----------------
-  async function renderDashboard(projectId) {
+  async function renderDashboard(projectId, building, floor) {
     root.innerHTML = `<div class="card"><p class="help">Loading...</p></div>`;
     let project, units;
     try {
@@ -338,7 +353,7 @@
       return;
     }
 
-    drawDashboard(project, units);
+    drawDashboard(project, units, building, floor);
     startPolling(async () => {
       const fresh = await api(`/api/units?projectId=${projectId}`).then((d) => d.units);
       const searchBox = document.getElementById('searchBox');
@@ -405,6 +420,7 @@
     if (!grid) return;
     const f = (filter || '').trim().toLowerCase();
     const filtered = units.filter((u) => !f || u.unitNumber.toLowerCase().includes(f));
+    grid.dataset.level = 'units';
     grid.innerHTML = filtered.map((u) => `
       <button class="unit-tile ${u.complete ? 'complete' : (u.inProgress ? 'inprogress' : '')}" data-id="${u.id}">
         ${u.complete ? '<div class="check">&#10003;</div>' : ''}
@@ -419,11 +435,62 @@
     });
   }
 
-  function drawDashboard(project, units) {
+  // A unit number carries its own location: first digit the building,
+  // second the floor. 1202 is building 1, floor 2.
+  const buildingOfUnit = (n) => { const m = String(n || '').trim().match(/^(\d)/); return m ? m[1] : 'Other'; };
+  const floorOfUnit = (n) => { const m = String(n || '').trim().match(/^\d(\d)/); return m ? m[1] : 'Other'; };
+
+  // Rolls a set of units into groups with their own progress totals, so a
+  // building or floor tile shows how much of it is done — the thing a super
+  // actually wants to know before walking over there.
+  function groupUnits(units, keyOf) {
+    const groups = new Map();
+    for (const u of units) {
+      const key = keyOf(u.unitNumber);
+      if (!groups.has(key)) groups.set(key, { key, units: [], doneItems: 0, totalItems: 0, completeUnits: 0 });
+      const g = groups.get(key);
+      g.units.push(u);
+      g.doneItems += u.doneItems;
+      g.totalItems += u.totalItems;
+      if (u.complete) g.completeUnits++;
+    }
+    return [...groups.values()].sort((a, b) => {
+      if (a.key === 'Other') return 1;
+      if (b.key === 'Other') return -1;
+      return Number(a.key) - Number(b.key);
+    });
+  }
+
+  function drawDashboard(project, units, building, floor) {
     const totalUnits = units.length;
     const completeUnits = units.filter((u) => u.complete).length;
     const totalItems = units.reduce((s, u) => s + u.totalItems, 0);
     const doneItems = units.reduce((s, u) => s + u.doneItems, 0);
+
+    // Which slice of the job is on screen: the whole project, one building,
+    // or one floor of one building.
+    const inScope = units.filter((u) =>
+      (building === undefined || buildingOfUnit(u.unitNumber) === building) &&
+      (floor === undefined || floorOfUnit(u.unitNumber) === floor));
+
+    const scopeUnits = inScope.length;
+    const scopeComplete = inScope.filter((u) => u.complete).length;
+    const scopeDone = inScope.reduce((s, u) => s + u.doneItems, 0);
+    const scopeTotal = inScope.reduce((s, u) => s + u.totalItems, 0);
+
+    const crumbs = [`<a href="#/project/${project.id}" class="crumb">All buildings</a>`];
+    if (building !== undefined) {
+      const label = building === 'Other' ? 'Other units' : `Building ${escapeHtml(building)}`;
+      crumbs.push(floor === undefined ? `<span class="crumb current">${label}</span>`
+        : `<a href="#/project/${project.id}/b/${encodeURIComponent(building)}" class="crumb">${label}</a>`);
+    }
+    if (floor !== undefined) {
+      crumbs.push(`<span class="crumb current">${floor === 'Other' ? 'Other' : `Floor ${escapeHtml(floor)}`}</span>`);
+    }
+
+    const backTarget = floor !== undefined
+      ? `/project/${project.id}/b/${encodeURIComponent(building)}`
+      : (building !== undefined ? `/project/${project.id}` : '');
 
     root.innerHTML = `
       <div class="row between">
@@ -432,22 +499,24 @@
           <button class="secondary" id="renameProjectBtn" aria-label="Rename project" style="padding:4px 8px;">&#9998;</button>
         </div>
         <div class="row">
-          <button class="secondary" id="allProjectsBtn">&larr; All projects</button>
+          <button class="secondary" id="backBtn">&larr; ${building === undefined ? 'All projects' : 'Back'}</button>
           <button class="secondary" id="reimportBtn">Re-import list</button>
         </div>
       </div>
+      <div class="crumbs">${crumbs.join('<span class="crumb-sep">/</span>')}</div>
       <div class="stats">
-        <div class="stat"><div class="num">${completeUnits}/${totalUnits}</div><div class="label">Units complete</div></div>
-        <div class="stat"><div class="num">${doneItems}/${totalItems}</div><div class="label">Items scanned</div></div>
+        <div class="stat"><div class="num">${scopeComplete}/${scopeUnits}</div><div class="label">Units complete</div></div>
+        <div class="stat"><div class="num">${scopeDone}/${scopeTotal}</div><div class="label">Items scanned</div></div>
       </div>
       <div class="card">
         <div class="row">
-          <input type="text" id="searchBox" placeholder="Search unit number..." />
+          <input type="text" id="searchBox" placeholder="Search any unit number..." />
         </div>
         <div class="unit-grid" id="unitGrid" data-project-id="${project.id}"></div>
       </div>
       <div class="card">
         <h2>Export</h2>
+        <p class="help">One tab per building, laid out like the Appliance List: unit in column A, Model #/Serial # in column B, one column per appliance.</p>
         <div class="row">
           <a href="/api/export.xlsx?projectId=${project.id}"><button class="primary">Download Excel</button></a>
           <a href="/api/export.csv?projectId=${project.id}"><button class="secondary">Download CSV</button></a>
@@ -455,9 +524,48 @@
       </div>
     `;
 
-    renderUnitGrid(units, '');
-    document.getElementById('searchBox').addEventListener('input', (e) => renderUnitGrid(units, e.target.value));
-    document.getElementById('allProjectsBtn').addEventListener('click', () => navigate(''));
+    drawLevel();
+
+    // Searching cuts straight to matching units from wherever you are —
+    // hunting one unit shouldn't mean walking back down the hierarchy.
+    document.getElementById('searchBox').addEventListener('input', (e) => {
+      const term = e.target.value.trim();
+      if (term) renderUnitGrid(units.filter((u) => u.unitNumber.toLowerCase().includes(term.toLowerCase())), '');
+      else drawLevel();
+    });
+
+    function drawLevel() {
+      const grid = document.getElementById('unitGrid');
+      if (floor !== undefined) { renderUnitGrid(inScope, ''); return; }
+
+      const groups = building === undefined
+        ? groupUnits(units, buildingOfUnit)
+        : groupUnits(inScope, floorOfUnit);
+
+      grid.innerHTML = groups.map((g) => {
+        const done = g.completeUnits === g.units.length;
+        const label = building === undefined
+          ? (g.key === 'Other' ? 'Other' : `Bldg ${escapeHtml(g.key)}`)
+          : (g.key === 'Other' ? 'Other' : `Floor ${escapeHtml(g.key)}`);
+        return `
+          <button class="unit-tile ${done ? 'complete' : (g.doneItems > 0 ? 'inprogress' : '')}" data-key="${escapeHtml(g.key)}">
+            ${done ? '<div class="check">&#10003;</div>' : ''}
+            <div class="unit-num">${label}</div>
+            <div class="unit-progress">${g.completeUnits}/${g.units.length} units</div>
+          </button>`;
+      }).join('') || '<p class="help">No units.</p>';
+
+      grid.querySelectorAll('.unit-tile').forEach((el) => {
+        el.addEventListener('click', () => {
+          const key = el.dataset.key;
+          navigate(building === undefined
+            ? `/project/${project.id}/b/${encodeURIComponent(key)}`
+            : `/project/${project.id}/b/${encodeURIComponent(building)}/f/${encodeURIComponent(key)}`);
+        });
+      });
+    }
+
+    document.getElementById('backBtn').addEventListener('click', () => navigate(backTarget));
     document.getElementById('renameProjectBtn').addEventListener('click', async () => {
       const newName = await showPrompt('Rename project', project.name, 'Save');
       if (!newName) return;
