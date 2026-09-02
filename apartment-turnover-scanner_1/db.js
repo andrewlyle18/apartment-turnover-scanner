@@ -18,7 +18,8 @@ const BASE_SCHEMA = `
 CREATE TABLE IF NOT EXISTS projects (
   id SERIAL PRIMARY KEY,
   name TEXT NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  trashed_at TIMESTAMPTZ
 );
 
 CREATE TABLE IF NOT EXISTS units (
@@ -94,11 +95,18 @@ async function migrateToProjects(client) {
   await client.query('CREATE INDEX IF NOT EXISTS idx_units_project_id ON units(project_id);');
 }
 
+// Adds soft-delete support to projects created before the trash feature
+// existed. Safe to run repeatedly.
+async function migrateTrash(client) {
+  await client.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS trashed_at TIMESTAMPTZ;`);
+}
+
 async function initSchema() {
   const client = await pool.connect();
   try {
     await client.query(BASE_SCHEMA);
     await migrateToProjects(client);
+    await migrateTrash(client);
   } finally {
     client.release();
   }

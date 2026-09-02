@@ -11,8 +11,10 @@ app.use(express.json({ limit: '4mb' })); // frames are small (resized client-sid
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ---------- Projects ----------
-app.get('/api/projects', async (req, res) => {
-  const projectsResult = await pool.query('SELECT id, name, created_at FROM projects ORDER BY created_at DESC');
+async function loadProjectsWithStats(whereClause) {
+  const projectsResult = await pool.query(
+    `SELECT id, name, created_at, trashed_at FROM projects WHERE ${whereClause} ORDER BY COALESCE(trashed_at, created_at) DESC`
+  );
   const statsResult = await pool.query(`
     SELECT u.project_id,
            COUNT(DISTINCT u.id)::int AS total_units,
@@ -29,19 +31,31 @@ app.get('/api/projects', async (req, res) => {
   `);
   const statsByProject = new Map(statsResult.rows.map((r) => [r.project_id, r]));
 
-  const projects = projectsResult.rows.map((p) => {
+  return projectsResult.rows.map((p) => {
     const s = statsByProject.get(p.id) || { total_units: 0, complete_units: 0, total_items: 0, done_items: 0 };
     return {
       id: p.id,
       name: p.name,
       createdAt: p.created_at,
+      trashedAt: p.trashed_at,
       totalUnits: s.total_units,
       completeUnits: s.complete_units,
       totalItems: s.total_items,
       doneItems: s.done_items,
     };
   });
+}
 
+app.get('/api/projects', async (req, res) => {
+  const projects = await loadProjectsWithStats('trashed_at IS NULL');
+  res.json({ projects });
+});
+
+// Trashed projects — "moved to trash" but not permanently deleted, so they
+// can be restored later. Must be declared before /api/projects/:id so
+// "trash" isn't matched as an :id.
+app.get('/api/projects/trash', async (req, res) => {
+  const projects = await loadProjectsWithStats('trashed_at IS NOT NULL');
   res.json({ projects });
 });
 
@@ -53,7 +67,7 @@ app.post('/api/projects', async (req, res) => {
 });
 
 app.get('/api/projects/:id', async (req, res) => {
-  const result = await pool.query('SELECT id, name, created_at FROM projects WHERE id = $1', [req.params.id]);
+  const result = await pool.query('SELECT id, name, created_at, trashed_at FROM projects WHERE id = $1', [req.params.id]);
   if (!result.rows.length) return res.status(404).json({ error: 'Project not found' });
   res.json({ project: result.rows[0] });
 });
@@ -69,10 +83,24 @@ app.patch('/api/projects/:id', async (req, res) => {
   res.json({ project: result.rows[0] });
 });
 
+// Moves a project to the trash (soft delete) rather than deleting it —
+// it stays fully intact and can be restored from /api/projects/trash.
 app.delete('/api/projects/:id', async (req, res) => {
-  const result = await pool.query('DELETE FROM projects WHERE id = $1 RETURNING id', [req.params.id]);
+  const result = await pool.query(
+    'UPDATE projects SET trashed_at = now() WHERE id = $1 AND trashed_at IS NULL RETURNING id',
+    [req.params.id]
+  );
   if (!result.rows.length) return res.status(404).json({ error: 'Project not found' });
   res.json({ ok: true });
+});
+
+app.post('/api/projects/:id/restore', async (req, res) => {
+  const result = await pool.query(
+    'UPDATE projects SET trashed_at = NULL WHERE id = $1 AND trashed_at IS NOT NULL RETURNING id, name, created_at',
+    [req.params.id]
+  );
+  if (!result.rows.length) return res.status(404).json({ error: 'Project not found in trash' });
+  res.json({ project: result.rows[0] });
 });
 
 // ---------- Import ----------
