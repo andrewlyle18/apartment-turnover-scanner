@@ -212,6 +212,69 @@ input[type="text"], input[type="file"] {
   line-height: 1;
 }
 
+/* New project + dropdown */
+.new-project-menu { position: relative; }
+.new-project-btn {
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  font-size: 22px;
+  line-height: 1;
+  border-radius: 50%;
+}
+.new-project-panel {
+  position: absolute;
+  top: 48px;
+  right: 0;
+  z-index: 30;
+  width: min(360px, 90vw);
+  background: var(--card);
+  border-radius: var(--radius);
+  padding: 16px;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.18);
+}
+
+/* Project tiles on cover page */
+.project-tile { cursor: pointer; }
+.project-delete, .project-edit {
+  position: absolute;
+  top: 4px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  line-height: 1;
+  border-radius: 50%;
+  background: #eee;
+  color: #666;
+  font-size: 12px;
+}
+.project-delete { left: 4px; font-size: 14px; }
+.project-edit { left: 26px; }
+.project-delete:hover { background: var(--danger); color: white; }
+.project-edit:hover { background: var(--green); color: white; }
+
+/* Custom confirm modal (avoids native window.confirm, which can hang
+   automated/embedded browser contexts) */
+.confirm-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.45);
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+.confirm-box {
+  background: var(--card);
+  border-radius: var(--radius);
+  padding: 18px;
+  max-width: 360px;
+  width: 100%;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.25);
+}
+.confirm-box p { margin: 0 0 16px; line-height: 1.4; }
+
 .toast {
   position: fixed;
   bottom: 20px;

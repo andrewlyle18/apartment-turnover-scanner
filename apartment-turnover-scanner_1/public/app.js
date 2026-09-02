@@ -19,6 +19,68 @@
     setTimeout(() => el.remove(), 2200);
   }
 
+  // Custom in-page confirm modal (native window.confirm() blocks the whole
+  // tab in a way that can hang automated/embedded contexts, so we avoid it).
+  function showConfirm(message, confirmLabel) {
+    return new Promise((resolve) => {
+      const overlay = document.createElement('div');
+      overlay.className = 'confirm-overlay';
+      overlay.innerHTML = `
+        <div class="confirm-box">
+          <p>${escapeHtml(message)}</p>
+          <div class="row" style="justify-content:flex-end; gap:8px;">
+            <button class="secondary" data-action="cancel">Cancel</button>
+            <button class="danger" data-action="ok">${escapeHtml(confirmLabel || 'Confirm')}</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(overlay);
+      function done(result) {
+        overlay.remove();
+        resolve(result);
+      }
+      overlay.querySelector('[data-action="cancel"]').addEventListener('click', () => done(false));
+      overlay.querySelector('[data-action="ok"]').addEventListener('click', () => done(true));
+      overlay.addEventListener('click', (e) => { if (e.target === overlay) done(false); });
+    });
+  }
+
+  // Custom in-page text prompt (avoids native window.prompt() for the same
+  // reason as showConfirm above). Resolves to the trimmed string, or null
+  // if cancelled / left blank.
+  function showPrompt(message, initialValue, confirmLabel) {
+    return new Promise((resolve) => {
+      const overlay = document.createElement('div');
+      overlay.className = 'confirm-overlay';
+      overlay.innerHTML = `
+        <div class="confirm-box">
+          <p>${escapeHtml(message)}</p>
+          <input type="text" id="promptInput" style="margin-bottom:16px;" />
+          <div class="row" style="justify-content:flex-end; gap:8px;">
+            <button class="secondary" data-action="cancel">Cancel</button>
+            <button class="primary" data-action="ok">${escapeHtml(confirmLabel || 'Save')}</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(overlay);
+      const input = overlay.querySelector('#promptInput');
+      input.value = initialValue || '';
+      input.focus();
+      input.select();
+      function done(result) {
+        overlay.remove();
+        resolve(result);
+      }
+      overlay.querySelector('[data-action="cancel"]').addEventListener('click', () => done(null));
+      overlay.querySelector('[data-action="ok"]').addEventListener('click', () => done(input.value.trim() || null));
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') done(input.value.trim() || null);
+        if (e.key === 'Escape') done(null);
+      });
+      overlay.addEventListener('click', (e) => { if (e.target === overlay) done(null); });
+    });
+  }
+
   async function api(path, opts) {
     const resp = await fetch(path, {
       headers: { 'Content-Type': 'application/json' },
@@ -99,37 +161,86 @@
     root.innerHTML = `
       <div class="row between">
         <h1>Projects</h1>
+        <div class="new-project-menu">
+          <button class="primary new-project-btn" id="newProjectToggle" aria-label="New project">+</button>
+          <div class="new-project-panel" id="newProjectPanel" hidden>
+            <h2>Start a new project</h2>
+            <p class="help">Give this job a name, then upload its unit list (.xlsx or .csv). Column A should have the unit number and the columns after it list the appliances — either the same fixed checklist for every unit (header row names the appliance types) or a custom list per unit.</p>
+            <div class="row" style="margin-top:8px;">
+              <input type="text" id="newProjectName" placeholder="Project name (e.g. Maple Ridge Apartments)" />
+            </div>
+            <div class="row" style="margin-top:10px;">
+              <input type="file" id="importFile" accept=".xlsx,.xls,.csv" />
+            </div>
+            <div class="row" style="margin-top:12px;">
+              <button class="primary" id="createProjectBtn">Create project</button>
+            </div>
+            <div id="importMsg" style="margin-top:10px;"></div>
+          </div>
+        </div>
       </div>
       <div class="card">
         <div class="unit-grid" id="projectGrid"></div>
-        ${projects.length === 0 ? '<p class="help">No projects yet — create your first one below.</p>' : ''}
-      </div>
-      <div class="card">
-        <h2>Start a new project</h2>
-        <p class="help">Give this job a name, then upload its unit list (.xlsx or .csv). Column A should have the unit number and the columns after it list the appliances — either the same fixed checklist for every unit (header row names the appliance types) or a custom list per unit.</p>
-        <div class="row" style="margin-top:8px;">
-          <input type="text" id="newProjectName" placeholder="Project name (e.g. Maple Ridge Apartments)" />
-        </div>
-        <div class="row" style="margin-top:10px;">
-          <input type="file" id="importFile" accept=".xlsx,.xls,.csv" />
-        </div>
-        <div class="row" style="margin-top:12px;">
-          <button class="primary" id="createProjectBtn">Create project</button>
-        </div>
-        <div id="importMsg" style="margin-top:10px;"></div>
+        ${projects.length === 0 ? '<p class="help">No projects yet — click the + button above to create your first one.</p>' : ''}
       </div>
     `;
 
+    const panel = document.getElementById('newProjectPanel');
+    const toggleBtn = document.getElementById('newProjectToggle');
+    toggleBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      panel.hidden = !panel.hidden;
+    });
+    document.addEventListener('click', (e) => {
+      if (!panel.hidden && !panel.contains(e.target) && e.target !== toggleBtn) {
+        panel.hidden = true;
+      }
+    }, { once: true });
+
     const grid = document.getElementById('projectGrid');
     grid.innerHTML = projects.map((p) => `
-      <button class="unit-tile ${p.totalUnits > 0 && p.completeUnits === p.totalUnits ? 'complete' : (p.doneItems > 0 ? 'inprogress' : '')}" data-id="${p.id}">
+      <div class="unit-tile project-tile ${p.totalUnits > 0 && p.completeUnits === p.totalUnits ? 'complete' : (p.doneItems > 0 ? 'inprogress' : '')}" data-id="${p.id}">
+        <button class="project-delete" data-id="${p.id}" aria-label="Delete project">&times;</button>
+        <button class="project-edit" data-id="${p.id}" aria-label="Rename project">&#9998;</button>
         ${p.totalUnits > 0 && p.completeUnits === p.totalUnits ? '<div class="check">&#10003;</div>' : ''}
         <div class="unit-num">${escapeHtml(p.name)}</div>
         <div class="unit-progress">${p.completeUnits}/${p.totalUnits} units</div>
-      </button>
+      </div>
     `).join('');
-    grid.querySelectorAll('.unit-tile').forEach((el) => {
+    grid.querySelectorAll('.project-tile').forEach((el) => {
       el.addEventListener('click', () => navigate(`/project/${el.dataset.id}`));
+    });
+    grid.querySelectorAll('.project-delete').forEach((btn) => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const id = btn.dataset.id;
+        const proj = projects.find((p) => String(p.id) === String(id));
+        const ok = await showConfirm(`Delete "${proj ? proj.name : 'this project'}" and all its units and scanned data? This cannot be undone.`, 'Delete project');
+        if (!ok) return;
+        try {
+          await api(`/api/projects/${id}`, { method: 'DELETE' });
+          toast('Project deleted');
+          renderProjects();
+        } catch (err) {
+          toast(`Could not delete: ${err.message}`);
+        }
+      });
+    });
+    grid.querySelectorAll('.project-edit').forEach((btn) => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const id = btn.dataset.id;
+        const proj = projects.find((p) => String(p.id) === String(id));
+        const newName = await showPrompt('Rename project', proj ? proj.name : '', 'Save');
+        if (!newName) return;
+        try {
+          await api(`/api/projects/${id}`, { method: 'PATCH', body: JSON.stringify({ name: newName }) });
+          toast('Project renamed');
+          renderProjects();
+        } catch (err) {
+          toast(`Could not rename: ${err.message}`);
+        }
+      });
     });
 
     document.getElementById('createProjectBtn').addEventListener('click', async () => {
@@ -263,7 +374,10 @@
 
     root.innerHTML = `
       <div class="row between">
-        <h1>${escapeHtml(project.name)}</h1>
+        <div class="row" style="gap:8px;">
+          <h1 style="margin:0;">${escapeHtml(project.name)}</h1>
+          <button class="secondary" id="renameProjectBtn" aria-label="Rename project" style="padding:4px 8px;">&#9998;</button>
+        </div>
         <div class="row">
           <button class="secondary" id="allProjectsBtn">&larr; All projects</button>
           <button class="secondary" id="reimportBtn">Re-import list</button>
@@ -291,8 +405,20 @@
     renderUnitGrid(units, '');
     document.getElementById('searchBox').addEventListener('input', (e) => renderUnitGrid(units, e.target.value));
     document.getElementById('allProjectsBtn').addEventListener('click', () => navigate(''));
-    document.getElementById('reimportBtn').addEventListener('click', () => {
-      if (confirm('This replaces the current unit list and all progress for this project. Continue?')) {
+    document.getElementById('renameProjectBtn').addEventListener('click', async () => {
+      const newName = await showPrompt('Rename project', project.name, 'Save');
+      if (!newName) return;
+      try {
+        await api(`/api/projects/${project.id}`, { method: 'PATCH', body: JSON.stringify({ name: newName }) });
+        toast('Project renamed');
+        renderDashboard(project.id);
+      } catch (err) {
+        toast(`Could not rename: ${err.message}`);
+      }
+    });
+    document.getElementById('reimportBtn').addEventListener('click', async () => {
+      const ok = await showConfirm('This replaces the current unit list and all progress for this project. Continue?', 'Replace list');
+      if (ok) {
         renderImportIntoProject(project);
       }
     });
