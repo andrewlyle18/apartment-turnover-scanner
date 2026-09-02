@@ -1,14 +1,8 @@
 (() => {
   const root = document.getElementById('view-root');
-  const scannedByInput = document.getElementById('scannedByInput');
-
-  scannedByInput.value = localStorage.getItem('scannedBy') || '';
-  scannedByInput.addEventListener('change', () => {
-    localStorage.setItem('scannedBy', scannedByInput.value.trim());
-  });
 
   function scannedBy() {
-    return scannedByInput.value.trim() || 'Unknown';
+    return 'Crew';
   }
 
   function toast(msg) {
@@ -124,6 +118,11 @@
       return;
     }
 
+    if (hash === '/trash') {
+      renderTrash();
+      return;
+    }
+
     const projectMatch = hash.match(/^\/project\/(\d+)$/);
     if (projectMatch) {
       renderDashboard(parseInt(projectMatch[1], 10));
@@ -161,21 +160,24 @@
     root.innerHTML = `
       <div class="row between">
         <h1>Projects</h1>
-        <div class="new-project-menu">
-          <button class="primary new-project-btn" id="newProjectToggle" aria-label="New project">+</button>
-          <div class="new-project-panel" id="newProjectPanel" hidden>
-            <h2>Start a new project</h2>
-            <p class="help">Give this job a name, then upload its unit list (.xlsx or .csv). Column A should have the unit number and the columns after it list the appliances — either the same fixed checklist for every unit (header row names the appliance types) or a custom list per unit.</p>
-            <div class="row" style="margin-top:8px;">
-              <input type="text" id="newProjectName" placeholder="Project name (e.g. Maple Ridge Apartments)" />
+        <div class="row" style="gap:8px;">
+          <button class="secondary" id="trashLink">Trash</button>
+          <div class="new-project-menu">
+            <button class="primary new-project-btn" id="newProjectToggle" aria-label="New project">+</button>
+            <div class="new-project-panel" id="newProjectPanel" hidden>
+              <h2>Start a new project</h2>
+              <p class="help">Give this job a name, then upload its unit list (.xlsx or .csv). Column A should have the unit number and the columns after it list the appliances — either the same fixed checklist for every unit (header row names the appliance types) or a custom list per unit.</p>
+              <div class="row" style="margin-top:8px;">
+                <input type="text" id="newProjectName" placeholder="Project name (e.g. Maple Ridge Apartments)" />
+              </div>
+              <div class="row" style="margin-top:10px;">
+                <input type="file" id="importFile" accept=".xlsx,.xls,.csv" />
+              </div>
+              <div class="row" style="margin-top:12px;">
+                <button class="primary" id="createProjectBtn">Create project</button>
+              </div>
+              <div id="importMsg" style="margin-top:10px;"></div>
             </div>
-            <div class="row" style="margin-top:10px;">
-              <input type="file" id="importFile" accept=".xlsx,.xls,.csv" />
-            </div>
-            <div class="row" style="margin-top:12px;">
-              <button class="primary" id="createProjectBtn">Create project</button>
-            </div>
-            <div id="importMsg" style="margin-top:10px;"></div>
           </div>
         </div>
       </div>
@@ -184,6 +186,8 @@
         ${projects.length === 0 ? '<p class="help">No projects yet — click the + button above to create your first one.</p>' : ''}
       </div>
     `;
+
+    document.getElementById('trashLink').addEventListener('click', () => navigate('/trash'));
 
     const panel = document.getElementById('newProjectPanel');
     const toggleBtn = document.getElementById('newProjectToggle');
@@ -200,7 +204,7 @@
     const grid = document.getElementById('projectGrid');
     grid.innerHTML = projects.map((p) => `
       <div class="unit-tile project-tile ${p.totalUnits > 0 && p.completeUnits === p.totalUnits ? 'complete' : (p.doneItems > 0 ? 'inprogress' : '')}" data-id="${p.id}">
-        <button class="project-delete" data-id="${p.id}" aria-label="Delete project">&times;</button>
+        <button class="project-delete" data-id="${p.id}" aria-label="Move project to trash">&#128465;</button>
         <button class="project-edit" data-id="${p.id}" aria-label="Rename project">&#9998;</button>
         ${p.totalUnits > 0 && p.completeUnits === p.totalUnits ? '<div class="check">&#10003;</div>' : ''}
         <div class="unit-num">${escapeHtml(p.name)}</div>
@@ -215,14 +219,14 @@
         e.stopPropagation();
         const id = btn.dataset.id;
         const proj = projects.find((p) => String(p.id) === String(id));
-        const ok = await showConfirm(`Delete "${proj ? proj.name : 'this project'}" and all its units and scanned data? This cannot be undone.`, 'Delete project');
+        const ok = await showConfirm(`Move "${proj ? proj.name : 'this project'}" to the trash? You can restore it later from Trash.`, 'Move to trash');
         if (!ok) return;
         try {
           await api(`/api/projects/${id}`, { method: 'DELETE' });
-          toast('Project deleted');
+          toast('Moved to trash');
           renderProjects();
         } catch (err) {
-          toast(`Could not delete: ${err.message}`);
+          toast(`Could not move to trash: ${err.message}`);
         }
       });
     });
@@ -263,6 +267,55 @@
       } catch (e) {
         msg.textContent = e.message;
       }
+    });
+  }
+
+  // ---------------- Trash ----------------
+  async function renderTrash() {
+    root.innerHTML = `<div class="card"><p class="help">Loading trash...</p></div>`;
+    let data;
+    try {
+      data = await api('/api/projects/trash');
+    } catch (e) {
+      root.innerHTML = `<div class="card"><p class="help">Could not reach the server: ${e.message}</p></div>`;
+      return;
+    }
+
+    const projects = data.projects;
+
+    root.innerHTML = `
+      <div class="row between">
+        <h1>Trash</h1>
+        <button class="secondary" id="backToProjectsBtn">&larr; All projects</button>
+      </div>
+      <div class="card">
+        <div class="unit-grid" id="trashGrid"></div>
+        ${projects.length === 0 ? '<p class="help">Trash is empty.</p>' : ''}
+      </div>
+    `;
+
+    document.getElementById('backToProjectsBtn').addEventListener('click', () => navigate(''));
+
+    const grid = document.getElementById('trashGrid');
+    grid.innerHTML = projects.map((p) => `
+      <div class="unit-tile project-tile" data-id="${p.id}">
+        <button class="project-restore" data-id="${p.id}" aria-label="Restore project">&#8635;</button>
+        <div class="unit-num">${escapeHtml(p.name)}</div>
+        <div class="unit-progress">${p.totalUnits} units</div>
+      </div>
+    `).join('');
+    grid.querySelectorAll('.project-restore').forEach((btn) => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const id = btn.dataset.id;
+        try {
+          await api(`/api/projects/${id}/restore`, { method: 'POST' });
+          toast('Project restored');
+          renderTrash();
+        } catch (err) {
+          toast(`Could not restore: ${err.message}`);
+        }
+      });
     });
   }
 

@@ -252,6 +252,20 @@ input[type="text"], input[type="file"] {
 .project-edit { left: 26px; }
 .project-delete:hover { background: var(--danger); color: white; }
 .project-edit:hover { background: var(--green); color: white; }
+.project-restore {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  line-height: 1;
+  border-radius: 50%;
+  background: #eee;
+  color: #666;
+  font-size: 13px;
+}
+.project-restore:hover { background: var(--green); color: white; }
 
 /* Custom confirm modal (avoids native window.confirm, which can hang
    automated/embedded browser contexts) */
