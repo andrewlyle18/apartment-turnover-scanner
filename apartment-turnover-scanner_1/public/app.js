@@ -1002,6 +1002,46 @@
     return { gray, w, h };
   }
 
+  // Whether the server has a cloud OCR key configured. Checked once per
+  // session; on-device OCR is used whenever this is false or the call fails.
+  let cloudOcrAvailable = null;
+  async function hasCloudOcr() {
+    if (cloudOcrAvailable !== null) return cloudOcrAvailable;
+    try {
+      const status = await api('/api/ocr/status');
+      cloudOcrAvailable = !!status.available;
+    } catch (e) {
+      cloudOcrAvailable = false;
+    }
+    return cloudOcrAvailable;
+  }
+
+  // Sends the photo to the server's cloud OCR. The image is scaled down and
+  // JPEG-compressed first: on site the upload runs over patchy cellular from
+  // inside a concrete building, so payload size drives the round trip far
+  // more than anything on the server.
+  function toUploadBlob(source) {
+    const longEdge = Math.max(source.width, source.height);
+    const scale = Math.min(1, 1600 / longEdge);
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(source.width * scale);
+    canvas.height = Math.round(source.height * scale);
+    const ctx = canvas.getContext('2d');
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
+    return new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.75));
+  }
+
+  async function readLabelViaCloud(source) {
+    const blob = await toUploadBlob(source);
+    const form = new FormData();
+    form.append('image', blob, 'label.jpg');
+    const resp = await fetch('/api/ocr', { method: 'POST', body: form });
+    if (!resp.ok) throw new Error(`cloud OCR failed (${resp.status})`);
+    const data = await resp.json();
+    return parseModelSerial(data.text || '');
+  }
+
   // Runs OCR over one image, fastest-and-most-likely configuration first.
   //
   // Speed comes from doing less, not from doing it worse: a sharp photo from
@@ -1017,6 +1057,23 @@
 
   async function readLabelFromCanvas(source, onProgress) {
     const guess = { model: '', serial: '' };
+
+    // Cloud first when it's configured: it reads plates that defeat
+    // in-browser OCR, and returns in a fraction of the time. Any failure —
+    // no signal, quota exhausted, server down — falls through to the
+    // on-device passes below, so scanning never hard-stops on site.
+    if (await hasCloudOcr()) {
+      try {
+        const cloud = await readLabelViaCloud(source);
+        if (cloud.model) guess.model = cloud.model;
+        if (cloud.serial) guess.serial = cloud.serial;
+        if (guess.model && guess.serial) return guess;
+        onProgress('Checking again on-device...');
+      } catch (e) {
+        onProgress('No signal for the fast reader — reading on-device...');
+      }
+    }
+
     const frames = new Map();
 
     for (let i = 0; i < OCR_TIERS.length; i++) {
