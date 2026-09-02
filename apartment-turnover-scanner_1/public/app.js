@@ -580,6 +580,11 @@
     // that ZIP codes, phone numbers, wattages and dates can't win.
     function isCode(tok, opts) {
       const requireLetter = !opts || opts.requireLetter !== false;
+      // Electrical ratings printed alongside the codes — "120VAC", "60HZ",
+      // "1000W", "15A". These are letter-and-digit mixes exactly like a real
+      // code, so shape alone cannot tell them apart. Checked first so it
+      // applies on every path, strict or not.
+      if (/^\d+(\.\d+)?(VAC|VDC|VA|V|HZ|KHZ|MHZ|GHZ|KW|W|MA|A|AMPS?|PSI|LBS?|KG|OZ|CFM|BTU|RPM)$/i.test(tok)) return false;
       // Strict mode is used only by the unlabelled fallback, where there is no
       // label to vouch for the value. Real plates print these codes in upper
       // case, so anything with lower-case letters there is far more likely to
@@ -667,14 +672,28 @@
     // "Model No. ABC123", "Model No./No de Modele: ABC123", "Modelo: ABC123"
     // and "MODEL ABC123 SERIAL XYZ789" alike, without caring what
     // punctuation or second-language text sits between label and value.
-    for (const line of lines) {
+    for (let li = 0; li < lines.length; li++) {
+      const line = lines[li];
       const mIdx = modelIndex(line);
       const sIdx = serialIndex(line);
       if (mIdx === -1 && sIdx === -1) continue;
 
-      // If both labels are on one line, each label owns the codes that
-      // follow it up to the next label.
       if (mIdx !== -1 && sIdx !== -1) {
+        // A column HEADER row ("MODEL NO.  SERIAL NO.  120VAC 60Hz"): the
+        // values sit on the row underneath, in the same left-to-right order.
+        // Checked before reading the header line itself, because anything
+        // trailing the labels there belongs to a further column — that is how
+        // a rating like "120VAC" ended up recorded as a serial number.
+        const below = tokensOf(lines[li + 1] || '').filter((t) => isCode(t));
+        if (below.length >= 2) {
+          const modelFirst = mIdx < sIdx;
+          if (!model) model = modelFirst ? below[0] : below[1];
+          if (!serial) serial = modelFirst ? below[1] : below[0];
+          continue;
+        }
+
+        // Otherwise both labels really are inline on this row, and each owns
+        // the codes that follow it up to the next label.
         const first = Math.min(mIdx, sIdx);
         const firstIsModel = mIdx < sIdx;
         const segA = line.slice(first, Math.max(mIdx, sIdx));
@@ -774,7 +793,11 @@
     root.innerHTML = `
       <div class="scan-screen">
         <div class="scan-photo-wrap" id="photoWrap">
-          <img id="scanPhoto" hidden alt="Captured nameplate" />
+          <div class="scan-photo-stage" id="photoStage" hidden>
+            <img id="scanPhoto" alt="Captured nameplate" />
+            <div class="scan-box scan-box-model" id="modelBox" hidden><span>MODEL</span></div>
+            <div class="scan-box scan-box-serial" id="serialBox" hidden><span>SERIAL</span></div>
+          </div>
           <div class="scan-placeholder" id="scanPlaceholder">
             <div class="scan-placeholder-mark">&#128247;</div>
             <p>Take a photo of the nameplate</p>
@@ -789,6 +812,13 @@
         </div>
         <div class="scan-controls">
           <input type="file" accept="image/*" capture="environment" id="photoInput" hidden />
+          <div class="fix-bar" id="fixBar" hidden>
+            <span class="fix-bar-label">Wrong value? Tap it on the photo to fix:</span>
+            <div class="fix-bar-buttons">
+              <button class="secondary" id="fixModelBtn">Fix MODEL</button>
+              <button class="secondary" id="fixSerialBtn">Fix SERIAL</button>
+            </div>
+          </div>
           <div class="buttons">
             <button class="primary" id="captureBtn">Take photo</button>
           </div>
@@ -815,6 +845,10 @@
     `;
 
     const photoEl = document.getElementById('scanPhoto');
+    const photoStage = document.getElementById('photoStage');
+    const modelBox = document.getElementById('modelBox');
+    const serialBox = document.getElementById('serialBox');
+    const fixBar = document.getElementById('fixBar');
     const photoInput = document.getElementById('photoInput');
     const placeholderEl = document.getElementById('scanPlaceholder');
     const statusEl = document.getElementById('scanStatus');
@@ -855,8 +889,10 @@
         // on a phone when it's only ever shown a few hundred pixels wide. The
         // full-resolution canvas is kept for OCR and tap-to-read crops.
         photoEl.src = previewDataUrl(fullPhoto);
-        photoEl.hidden = false;
+        photoStage.hidden = false;
         placeholderEl.hidden = true;
+        fixBar.hidden = false;
+        hideBoxes();
         captureBtn.textContent = 'Retake photo';
 
         await ensureWorker();
@@ -869,22 +905,86 @@
       captureBtn.disabled = false;
     });
 
+    // Which field the next tap on the photo should fill. Null means the tap
+    // fills whichever field is still empty — the common case straight after a
+    // capture. "Fix MODEL"/"Fix SERIAL" aim it at a specific field, which is
+    // what you want when a value came back wrong rather than missing.
+    let fixTarget = null;
+
+    function setFixTarget(target) {
+      fixTarget = target;
+      document.getElementById('fixModelBtn').classList.toggle('armed', target === 'model');
+      document.getElementById('fixSerialBtn').classList.toggle('armed', target === 'serial');
+      if (target) statusEl.textContent = `Tap the ${target.toUpperCase()} on the photo`;
+    }
+
+    document.getElementById('fixModelBtn').addEventListener('click', () => setFixTarget(fixTarget === 'model' ? null : 'model'));
+    document.getElementById('fixSerialBtn').addEventListener('click', () => setFixTarget(fixTarget === 'serial' ? null : 'serial'));
+
+    function hideBoxes() {
+      modelBox.hidden = true;
+      serialBox.hidden = true;
+    }
+
+    // Draws a box over the region a value was read from. The photo is
+    // object-fit:contain, so the rendered image can be letterboxed inside the
+    // element — the box has to be positioned against the rendered image, not
+    // the element, or it drifts off the text it is meant to mark.
+    function drawBox(el, box) {
+      if (!box) { el.hidden = true; return; }
+      const natW = photoEl.naturalWidth, natH = photoEl.naturalHeight;
+      const elW = photoEl.clientWidth, elH = photoEl.clientHeight;
+      if (!natW || !natH || !elW || !elH) { el.hidden = true; return; }
+
+      const scale = Math.min(elW / natW, elH / natH);
+      const renderedW = natW * scale, renderedH = natH * scale;
+      const offsetX = (elW - renderedW) / 2, offsetY = (elH - renderedH) / 2;
+
+      const pad = 0.004;
+      el.style.left = `${offsetX + (box.left - pad) * renderedW}px`;
+      el.style.top = `${offsetY + (box.top - pad) * renderedH}px`;
+      el.style.width = `${(box.width + pad * 2) * renderedW}px`;
+      el.style.height = `${(box.height + pad * 2) * renderedH}px`;
+      el.hidden = false;
+    }
+
     // Tapping the photo re-reads just that area at full sensor resolution.
-    // When a plate is small in frame, or one field read and the other didn't,
-    // pointing at the line is far quicker than retaking the shot.
+    // When a plate is small in frame, or a value came back wrong, pointing at
+    // the right line is far quicker than retaking the shot.
     photoEl.addEventListener('click', async (e) => {
       if (!fullPhoto || captureBtn.disabled) return;
       const rect = photoEl.getBoundingClientRect();
-      const relX = (e.clientX - rect.left) / rect.width;
-      const relY = (e.clientY - rect.top) / rect.height;
+      const natW = photoEl.naturalWidth, natH = photoEl.naturalHeight;
+      const scale = Math.min(rect.width / natW, rect.height / natH);
+      const renderedW = natW * scale, renderedH = natH * scale;
+      const offsetX = (rect.width - renderedW) / 2, offsetY = (rect.height - renderedH) / 2;
+
+      // Ignore taps on the letterboxed margin rather than clamping them,
+      // which would silently read the wrong part of the photo.
+      const relX = (e.clientX - rect.left - offsetX) / renderedW;
+      const relY = (e.clientY - rect.top - offsetY) / renderedH;
+      if (relX < 0 || relX > 1 || relY < 0 || relY > 1) return;
+
       captureBtn.disabled = true;
-      statusEl.textContent = 'Reading that area...';
+      statusEl.textContent = 'Reading that spot...';
       try {
         const region = cropRegion(fullPhoto, relX, relY);
         const guess = await readLabelFromCanvas(region, () => {});
-        applyGuess(guess, 'Nothing readable there — try tapping directly on the model or serial line.');
+        const value = fixTarget === 'serial'
+          ? (guess.serial || guess.model)
+          : (guess.model || guess.serial);
+
+        if (!value) {
+          statusEl.textContent = 'Nothing readable there — tap directly on the number.';
+        } else if (fixTarget) {
+          (fixTarget === 'model' ? modelField : serialField).value = value;
+          statusEl.textContent = `${fixTarget.toUpperCase()} set to ${value}. Check both, then Confirm.`;
+          setFixTarget(null);
+        } else {
+          applyGuess(guess, 'Nothing readable there — tap directly on the number.');
+        }
       } catch (err) {
-        statusEl.textContent = `Couldn't read that area (${err.message}).`;
+        statusEl.textContent = `Couldn't read that spot (${err.message}).`;
       }
       captureBtn.disabled = false;
     });
@@ -892,12 +992,18 @@
     function applyGuess(guess, emptyMessage) {
       if (guess.model) modelField.value = guess.model;
       if (guess.serial) serialField.value = guess.serial;
+
+      // Show where each value came from, so a wrong read is obvious at a
+      // glance instead of being discovered later in the spreadsheet.
+      drawBox(modelBox, guess.modelBox);
+      drawBox(serialBox, guess.serialBox);
+
       if (!guess.model && !guess.serial) {
-        statusEl.textContent = emptyMessage || "Couldn't read it clearly — tap directly on the label in the photo, or type it in below.";
+        statusEl.textContent = emptyMessage || "Couldn't read it — tap the number on the photo, or type it below.";
       } else if (guess.model && guess.serial) {
-        statusEl.textContent = 'Check both fields, then Confirm.';
+        statusEl.textContent = 'Check the boxes match, then Confirm.';
       } else {
-        statusEl.textContent = `Read the ${guess.model ? 'model' : 'serial'} only — tap the other line in the photo, or type it in.`;
+        statusEl.textContent = `Read the ${guess.model ? 'model' : 'serial'} only — tap the other one on the photo.`;
       }
     }
 
@@ -1045,17 +1151,44 @@
     const ctx = canvas.getContext('2d');
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
-    return new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.75));
+    return new Promise((resolve) => {
+      canvas.toBlob((blob) => resolve({ blob, width: canvas.width, height: canvas.height }), 'image/jpeg', 0.75);
+    });
   }
 
   async function readLabelViaCloud(source) {
-    const blob = await toUploadBlob(source);
+    const { blob, width, height } = await toUploadBlob(source);
     const form = new FormData();
     form.append('image', blob, 'label.jpg');
     const resp = await fetch('/api/ocr', { method: 'POST', body: form });
     if (!resp.ok) throw new Error(`cloud OCR failed (${resp.status})`);
     const data = await resp.json();
-    return parseModelSerial(data.text || '');
+    const guess = parseModelSerial(data.text || '');
+    // Keep the word positions (and the size they are relative to) so the app
+    // can show which part of the photo each value was read from.
+    guess.words = data.words || [];
+    guess.sourceWidth = width;
+    guess.sourceHeight = height;
+    return guess;
+  }
+
+  // Finds where a recognised value sits in the photo, as fractions of the
+  // image, so a box can be drawn over it at any display size.
+  function locateValue(value, words, sw, sh) {
+    if (!value || !words || !words.length || !sw || !sh) return null;
+    const target = value.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+    for (const w of words) {
+      const t = (w.text || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+      if (t && (t === target || t.includes(target) || target.includes(t))) {
+        return {
+          left: w.left / sw,
+          top: w.top / sh,
+          width: w.width / sw,
+          height: w.height / sh,
+        };
+      }
+    }
+    return null;
   }
 
   // Runs OCR over one image, fastest-and-most-likely configuration first.
@@ -1083,6 +1216,8 @@
         const cloud = await readLabelViaCloud(source);
         if (cloud.model) guess.model = cloud.model;
         if (cloud.serial) guess.serial = cloud.serial;
+        guess.modelBox = locateValue(cloud.model, cloud.words, cloud.sourceWidth, cloud.sourceHeight);
+        guess.serialBox = locateValue(cloud.serial, cloud.words, cloud.sourceWidth, cloud.sourceHeight);
         if (guess.model && guess.serial) return guess;
         onProgress('Checking again on-device...');
       } catch (e) {
