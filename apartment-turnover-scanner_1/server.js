@@ -433,6 +433,91 @@ app.get('/api/export.xlsx', async (req, res) => {
   res.send(buffer);
 });
 
+// ---------------- Learned label patterns ----------------
+//
+// Nameplate layouts repeat: every A. O. Smith water heater in a complex
+// prints its model the same way. Three things are learned from what the crew
+// confirms, and all of them generalise across units:
+//
+//   shape    — "ENL-50 120" becomes "AAA-99 999"
+//   context  — the label word the value followed ("modelnumber")
+//   rejected — the shape of a value someone overwrote, never to be picked again
+//
+// Position on screen is deliberately NOT learned: it changes with how the
+// phone is held. Position within the label's own text does not.
+app.get('/api/patterns', async (req, res) => {
+  const itemName = String(req.query.itemName || '').trim();
+  const empty = () => ({
+    model: { prefer: [], avoid: [], contexts: [] },
+    serial: { prefer: [], avoid: [], contexts: [] },
+  });
+  if (!itemName) return res.json({ patterns: empty() });
+
+  const result = await pool.query(
+    `SELECT field, shape, rejected, context_label, weight
+       FROM label_patterns
+      WHERE lower(item_name) = lower($1)
+      ORDER BY weight DESC, updated_at DESC
+      LIMIT 60`,
+    [itemName]
+  );
+
+  const patterns = empty();
+  for (const row of result.rows) {
+    const bucket = patterns[row.field];
+    if (!bucket) continue;
+    if (row.rejected) {
+      if (!bucket.avoid.includes(row.shape)) bucket.avoid.push(row.shape);
+    } else {
+      if (!bucket.prefer.includes(row.shape)) bucket.prefer.push(row.shape);
+      if (row.context_label && !bucket.contexts.includes(row.context_label)) bucket.contexts.push(row.context_label);
+    }
+  }
+  // A shape both confirmed and rejected is ambiguous. Trust the confirmation,
+  // otherwise the field could end up permanently unfillable.
+  for (const field of ['model', 'serial']) {
+    patterns[field].avoid = patterns[field].avoid.filter((sh) => !patterns[field].prefer.includes(sh));
+  }
+  res.json({ patterns });
+});
+
+app.post('/api/patterns', async (req, res) => {
+  const { itemName, field, shape, sample, contextLabel, rejected, weight } = req.body || {};
+  if (!itemName || !['model', 'serial'].includes(field) || !shape) {
+    return res.status(400).json({ error: 'itemName, field (model|serial) and shape are required' });
+  }
+  await pool.query(
+    `INSERT INTO label_patterns (item_name, field, shape, sample, context_label, rejected, weight)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     ON CONFLICT (item_name, field, shape, rejected)
+     DO UPDATE SET times_seen = label_patterns.times_seen + 1,
+                   weight = label_patterns.weight + EXCLUDED.weight,
+                   context_label = COALESCE(EXCLUDED.context_label, label_patterns.context_label),
+                   sample = COALESCE(EXCLUDED.sample, label_patterns.sample),
+                   updated_at = now()`,
+    [String(itemName).trim(), field, String(shape), sample ? String(sample) : null,
+     contextLabel ? String(contextLabel).slice(0, 40) : null, !!rejected, Number(weight) || 1]
+  );
+  res.json({ ok: true });
+});
+
+// What has been learned so far, so it can be reviewed and cleared rather than
+// being an opaque process that quietly gets things wrong.
+app.get('/api/patterns/summary', async (req, res) => {
+  const result = await pool.query(
+    `SELECT item_name, field, shape, sample, context_label, rejected, weight, times_seen
+       FROM label_patterns ORDER BY item_name, field, rejected, weight DESC`
+  );
+  res.json({ patterns: result.rows });
+});
+
+app.delete('/api/patterns', async (req, res) => {
+  const itemName = String(req.query.itemName || '').trim();
+  if (itemName) await pool.query('DELETE FROM label_patterns WHERE lower(item_name) = lower($1)', [itemName]);
+  else await pool.query('DELETE FROM label_patterns');
+  res.json({ ok: true });
+});
+
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 
 const PORT = process.env.PORT || 3000;

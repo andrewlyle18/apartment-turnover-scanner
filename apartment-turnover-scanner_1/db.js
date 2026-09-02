@@ -54,9 +54,18 @@ CREATE TABLE IF NOT EXISTS label_patterns (
   field TEXT NOT NULL,
   shape TEXT NOT NULL,
   sample TEXT,
+  -- The label word the value followed on the plate ("modelnumber", "serialno").
+  -- This is the useful sense of "where to look": position within the label's
+  -- own text, which is stable across units, unlike position on screen.
+  context_label TEXT,
+  -- A rejected pattern records what the value was NOT, learned when someone
+  -- overwrites a proposed value. Negative evidence is the strongest signal
+  -- the crew produces and was previously thrown away.
+  rejected BOOLEAN NOT NULL DEFAULT false,
+  weight INTEGER NOT NULL DEFAULT 1,
   times_seen INTEGER NOT NULL DEFAULT 1,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (item_name, field, shape)
+  UNIQUE (item_name, field, shape, rejected)
 );
 `;
 
@@ -127,9 +136,26 @@ async function migrateLabelPatterns(client) {
       shape TEXT NOT NULL,
       sample TEXT,
       times_seen INTEGER NOT NULL DEFAULT 1,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      UNIQUE (item_name, field, shape)
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
+  `);
+  await client.query(`ALTER TABLE label_patterns ADD COLUMN IF NOT EXISTS context_label TEXT;`);
+  await client.query(`ALTER TABLE label_patterns ADD COLUMN IF NOT EXISTS rejected BOOLEAN NOT NULL DEFAULT false;`);
+  await client.query(`ALTER TABLE label_patterns ADD COLUMN IF NOT EXISTS weight INTEGER NOT NULL DEFAULT 1;`);
+  // The uniqueness rule now has to separate a learned pattern from a rejected
+  // one, so both can be held for the same shape.
+  await client.query(`
+    DO $$
+    BEGIN
+      IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'label_patterns_item_name_field_shape_key') THEN
+        ALTER TABLE label_patterns DROP CONSTRAINT label_patterns_item_name_field_shape_key;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'label_patterns_item_field_shape_rejected_key') THEN
+        ALTER TABLE label_patterns
+          ADD CONSTRAINT label_patterns_item_field_shape_rejected_key
+          UNIQUE (item_name, field, shape, rejected);
+      END IF;
+    END $$;
   `);
 }
 
