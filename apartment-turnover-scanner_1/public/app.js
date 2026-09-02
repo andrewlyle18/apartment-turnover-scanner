@@ -580,6 +580,16 @@
     // that ZIP codes, phone numbers, wattages and dates can't win.
     function isCode(tok, opts) {
       const requireLetter = !opts || opts.requireLetter !== false;
+      // Strict mode is used only by the unlabelled fallback, where there is no
+      // label to vouch for the value. Real plates print these codes in upper
+      // case, so anything with lower-case letters there is far more likely to
+      // be OCR noise ("o21-1NG") than a genuine code.
+      if (opts && opts.strict) {
+        if (!/^[A-Z0-9][A-Z0-9\-\/]{5,}$/.test(tok)) return false;
+        if ((tok.match(/[0-9]/g) || []).length < 2) return false;
+        if (!/[A-Z]/.test(tok)) return false;
+        return !STOPWORDS.test(tok);
+      }
       if (!/^[A-Za-z0-9][A-Za-z0-9\-\/]{4,}$/.test(tok)) return false;
       if (!/[0-9]/.test(tok)) return false;
       if (requireLetter && !/[A-Za-z]/.test(tok)) return false;
@@ -730,7 +740,7 @@
       const candidates = [];
       for (const line of lines) {
         for (const tok of tokensOf(line)) {
-          if (isCode(tok) && !used.has(tok)) {
+          if (isCode(tok, { strict: true }) && !used.has(tok)) {
             candidates.push(tok);
             used.add(tok);
           }
@@ -763,19 +773,24 @@
 
     root.innerHTML = `
       <div class="scan-screen">
-        <div class="scan-video-wrap">
-          <video id="scanVideo" autoplay muted playsinline></video>
-          <div class="scan-guide"></div>
+        <div class="scan-photo-wrap" id="photoWrap">
+          <img id="scanPhoto" hidden alt="Captured nameplate" />
+          <div class="scan-placeholder" id="scanPlaceholder">
+            <div class="scan-placeholder-mark">&#128247;</div>
+            <p>Take a photo of the nameplate</p>
+            <p class="scan-placeholder-hint">Get close enough that the model and serial fill most of the frame. Use your camera's flash if the label is in the dark.</p>
+          </div>
           <div class="scan-flash" id="scanFlash"></div>
           <div class="scan-banner">
             <div class="item-target">${escapeHtml(item.name)}</div>
             <div class="progress">Item ${itemIndex + 1} of ${items.length} &middot; Unit ${escapeHtml(unitNumber)}</div>
           </div>
-          <div class="scan-status" id="scanStatus">Point at the label area, then tap Capture</div>
+          <div class="scan-status" id="scanStatus">Tap Take photo to read the label</div>
         </div>
         <div class="scan-controls">
+          <input type="file" accept="image/*" capture="environment" id="photoInput" hidden />
           <div class="buttons">
-            <button class="primary" id="captureBtn">Capture</button>
+            <button class="primary" id="captureBtn">Take photo</button>
           </div>
           <div class="fields">
             <div>
@@ -799,7 +814,9 @@
       </div>
     `;
 
-    const video = document.getElementById('scanVideo');
+    const photoEl = document.getElementById('scanPhoto');
+    const photoInput = document.getElementById('photoInput');
+    const placeholderEl = document.getElementById('scanPlaceholder');
     const statusEl = document.getElementById('scanStatus');
     const modelField = document.getElementById('modelField');
     const serialField = document.getElementById('serialField');
@@ -807,8 +824,10 @@
     modelField.value = item.model || '';
     serialField.value = item.serial || '';
 
-    let stream = null;
     let destroyed = false;
+    // Full-resolution photo kept around so a tap can re-read one region of it
+    // at native detail rather than at the downscaled size used for OCR.
+    let fullPhoto = null;
 
     document.getElementById('exitScan').addEventListener('click', (e) => {
       e.preventDefault();
@@ -816,48 +835,67 @@
       navigate(`/project/${projectId}/unit/${unitId}`);
     });
 
-    captureBtn.addEventListener('click', async () => {
-      if (!video.videoWidth) return;
+    // The phone's own camera app, not a getUserMedia video frame. This is the
+    // single biggest accuracy win available to us: the native camera gives a
+    // full-resolution still that is autofocused, properly exposed, optionally
+    // flash-lit and stabilised, where a live video frame is a low-resolution,
+    // frequently out-of-focus grab. OCR quality is dominated by input quality,
+    // and no amount of processing recovers detail the frame never captured.
+    captureBtn.addEventListener('click', () => photoInput.click());
+
+    photoInput.addEventListener('change', async () => {
+      const file = photoInput.files && photoInput.files[0];
+      if (!file) return;
       captureBtn.disabled = true;
       statusEl.textContent = 'Reading label...';
       try {
+        fullPhoto = await loadPhotoCanvas(file);
+        photoEl.src = fullPhoto.toDataURL('image/jpeg', 0.7);
+        photoEl.hidden = false;
+        placeholderEl.hidden = true;
+        captureBtn.textContent = 'Retake photo';
+
         await ensureWorker();
-
-        // Grab a short burst and keep the sharpest frame — handheld shots in
-        // a unit are often slightly motion-blurred, and blur costs more
-        // accuracy than anything else we can control here.
-        const base = await captureSharpestFrame(video, 3);
-
-        // Then work through renditions of that frame from most to least
-        // likely to succeed, stopping as soon as both fields are found. Each
-        // rendition fails differently, so a plate that defeats one is
-        // usually readable by the next — that's what makes this hold up on
-        // labels we've never seen, instead of only the ones we tuned for.
-        let guess = { model: '', serial: '' };
-        const attempts = buildOcrAttempts(base);
-        for (let i = 0; i < attempts.length; i++) {
-          const attempt = attempts[i];
-          if (i > 0) statusEl.textContent = `Reading label... (pass ${i + 1})`;
-          await tesseractWorker.setParameters({ tessedit_pageseg_mode: attempt.psm });
-          const { data } = await tesseractWorker.recognize(attempt.canvas);
-          const pass = parseModelSerial(data.text || '');
-          if (!guess.model && pass.model) guess.model = pass.model;
-          if (!guess.serial && pass.serial) guess.serial = pass.serial;
-          if (guess.model && guess.serial) break;
-        }
-
-        if (guess.model) modelField.value = guess.model;
-        if (guess.serial) serialField.value = guess.serial;
-        if (!guess.model && !guess.serial) {
-          statusEl.textContent = "Couldn't read it clearly — check the fields below or retake.";
-        } else {
-          statusEl.textContent = 'Check the fields below, then Confirm.';
-        }
+        const guess = await readLabelFromCanvas(fullPhoto, (msg) => { statusEl.textContent = msg; });
+        applyGuess(guess);
       } catch (e) {
-        statusEl.textContent = `OCR error (${e.message}). Type the model/serial in manually.`;
+        statusEl.textContent = `Couldn't read that photo (${e.message}). Type it in below.`;
+      }
+      photoInput.value = '';
+      captureBtn.disabled = false;
+    });
+
+    // Tapping the photo re-reads just that area at full sensor resolution.
+    // When a plate is small in frame, or one field read and the other didn't,
+    // pointing at the line is far quicker than retaking the shot.
+    photoEl.addEventListener('click', async (e) => {
+      if (!fullPhoto || captureBtn.disabled) return;
+      const rect = photoEl.getBoundingClientRect();
+      const relX = (e.clientX - rect.left) / rect.width;
+      const relY = (e.clientY - rect.top) / rect.height;
+      captureBtn.disabled = true;
+      statusEl.textContent = 'Reading that area...';
+      try {
+        const region = cropRegion(fullPhoto, relX, relY);
+        const guess = await readLabelFromCanvas(region, () => {});
+        applyGuess(guess, 'Nothing readable there — try tapping directly on the model or serial line.');
+      } catch (err) {
+        statusEl.textContent = `Couldn't read that area (${err.message}).`;
       }
       captureBtn.disabled = false;
     });
+
+    function applyGuess(guess, emptyMessage) {
+      if (guess.model) modelField.value = guess.model;
+      if (guess.serial) serialField.value = guess.serial;
+      if (!guess.model && !guess.serial) {
+        statusEl.textContent = emptyMessage || "Couldn't read it clearly — tap directly on the label in the photo, or type it in below.";
+      } else if (guess.model && guess.serial) {
+        statusEl.textContent = 'Check both fields, then Confirm.';
+      } else {
+        statusEl.textContent = `Read the ${guess.model ? 'model' : 'serial'} only — tap the other line in the photo, or type it in.`;
+      }
+    }
 
     document.getElementById('skipBtn').addEventListener('click', async () => {
       await saveItem(item.id, { status: 'skipped', scannedBy: scannedBy() });
@@ -887,7 +925,6 @@
 
     function cleanup() {
       destroyed = true;
-      if (stream) stream.getTracks().forEach((t) => t.stop());
     }
 
     async function saveItem(id, body) {
@@ -900,76 +937,61 @@
       }
     }
 
-    async function startCamera() {
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          // Ask for as much sensor resolution as the phone will give us —
-          // nameplate text is small within the frame, and pixels on the label
-          // are the single biggest factor in whether OCR can read it. Phones
-          // that can't do this fall back to whatever they support.
-          video: { facingMode: { ideal: 'environment' }, width: { ideal: 3840 }, height: { ideal: 2160 } },
-          audio: false,
-        });
-        if (destroyed) { stream.getTracks().forEach((t) => t.stop()); return; }
-        video.srcObject = stream;
-        await video.play();
-        // Warm up the OCR engine in the background so the first Capture tap is fast.
-        ensureWorker().catch(() => {});
-      } catch (e) {
-        statusEl.textContent = `Camera unavailable (${e.message}). Type the model/serial in manually below.`;
-      }
-    }
-
-    startCamera();
+    // Warm the OCR engine up while the user is framing their shot.
+    ensureWorker().catch(() => {});
   }
 
-  // Captures everything currently visible in the camera view as a single
-  // full-resolution still (on tap, not continuously) and returns a canvas
-  // ready for Tesseract.
-  //
-  // We deliberately OCR the whole visible frame rather than a tight crop:
-  // the user should be able to point the phone at the general area of the
-  // nameplate and let the parser work out which strings are the model and
-  // serial, instead of having to line a small label up inside a box.
-  //
-  // The video is rendered with object-fit: cover, which scales and
-  // center-crops the raw camera frame to fill the element, so part of the
-  // raw frame is off-screen. We reproduce that same math here and capture
-  // exactly the on-screen region — what you see is what gets read.
-  function captureFrame(video) {
-    const vw = video.videoWidth;
-    const vh = video.videoHeight;
+  // Decodes a photo from the camera into a full-resolution canvas.
+  function loadPhotoCanvas(file) {
+    return new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        canvas.getContext('2d').drawImage(img, 0, 0);
+        URL.revokeObjectURL(url);
+        resolve(canvas);
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('could not decode image')); };
+      img.src = url;
+    });
+  }
 
-    const rect = video.getBoundingClientRect();
-    const cw = rect.width || vw;
-    const ch = rect.height || vh;
-
-    // object-fit: cover scales the raw frame up until it fully covers the
-    // element, then center-crops the overflow.
-    const scale = Math.max(cw / vw, ch / vh);
-    const offsetX = (vw * scale - cw) / 2;
-    const offsetY = (vh * scale - ch) / 2;
-
-    // The full on-screen area, mapped back into raw source-frame pixels.
-    const cropX = offsetX / scale;
-    const cropY = offsetY / scale;
-    const cropW = cw / scale;
-    const cropH = ch / scale;
-
-    // Upscale small frames — Tesseract needs generous character height, and
-    // nameplate text is small within a full frame. Cap the long edge so OCR
-    // stays responsive on a phone.
-    let outScale = 1;
-    const longEdge = Math.max(cropW, cropH);
-    if (longEdge < 2200) outScale = 2200 / longEdge;
-    if (longEdge * outScale > 2600) outScale = 2600 / longEdge;
+  // Crops a region around a point the user tapped, taken from the photo at
+  // native resolution so the crop gains real detail rather than just zooming
+  // pixels that were already thrown away.
+  function cropRegion(photo, relX, relY) {
+    const rw = Math.round(photo.width * 0.55);
+    const rh = Math.round(photo.height * 0.22);
+    const x = Math.max(0, Math.min(photo.width - rw, Math.round(photo.width * relX - rw / 2)));
+    const y = Math.max(0, Math.min(photo.height - rh, Math.round(photo.height * relY - rh / 2)));
 
     const canvas = document.createElement('canvas');
-    canvas.width = Math.round(cropW * outScale);
-    canvas.height = Math.round(cropH * outScale);
+    canvas.width = rw;
+    canvas.height = rh;
+    canvas.getContext('2d').drawImage(photo, x, y, rw, rh, 0, 0, rw, rh);
+    return canvas;
+  }
+
+  // Turns a canvas into the grayscale buffer the OCR renditions are built
+  // from, scaled so characters have enough height for Tesseract to work with
+  // but not so large that a phone chokes on it.
+  function frameFromCanvas(source, targetLongEdge) {
+    const longEdge = Math.max(source.width, source.height);
+    const target = targetLongEdge || 2400;
+    // Scale toward the target in both directions: a full-resolution phone
+    // photo is scaled down (OCR cost is pixels), a small crop is scaled up
+    // (Tesseract needs character height).
+    const scale = target / longEdge;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(source.width * scale);
+    canvas.height = Math.round(source.height * scale);
     const ctx = canvas.getContext('2d');
     ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, canvas.width, canvas.height);
+    ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
 
     const w = canvas.width, h = canvas.height;
     const d = ctx.getImageData(0, 0, w, h).data;
@@ -980,67 +1002,121 @@
     return { gray, w, h };
   }
 
-  // Mean absolute gradient — a blurred frame has softer edges, so this is a
-  // decent proxy for "which of these shots is in focus".
-  function frameSharpness(frame) {
-    const { gray, w, h } = frame;
-    let sum = 0, n = 0;
-    const step = 4; // sampling is plenty for a relative comparison
-    for (let y = step; y < h; y += step) {
-      for (let x = step; x < w; x += step) {
-        const i = y * w + x;
-        sum += Math.abs(gray[i] - gray[i - step]) + Math.abs(gray[i] - gray[i - step * w]);
-        n++;
+  // Runs OCR over one image, fastest-and-most-likely configuration first.
+  //
+  // Speed comes from doing less, not from doing it worse: a sharp photo from
+  // the phone's camera usually reads on the first pass, and OCR time scales
+  // with pixel count, so pass 1 works at a deliberately modest size. Only a
+  // plate that fails pays for the bigger, slower passes.
+  const OCR_TIERS = [
+    { longEdge: 1500, rendition: 'adaptive', psm: '6' },
+    { longEdge: 2400, rendition: 'adaptive', psm: '3' },
+    { longEdge: 2400, rendition: 'plain', psm: '3' },
+    { longEdge: 2400, rendition: 'centre', psm: '3' },
+  ];
+
+  async function readLabelFromCanvas(source, onProgress) {
+    const guess = { model: '', serial: '' };
+    const frames = new Map();
+
+    for (let i = 0; i < OCR_TIERS.length; i++) {
+      const tier = OCR_TIERS[i];
+      if (i > 0) onProgress(`Still reading... (pass ${i + 1} of ${OCR_TIERS.length})`);
+
+      if (!frames.has(tier.longEdge)) frames.set(tier.longEdge, frameFromCanvas(source, tier.longEdge));
+      const canvas = renderFor(frames.get(tier.longEdge), tier.rendition);
+
+      await tesseractWorker.setParameters({ tessedit_pageseg_mode: tier.psm });
+      const { data } = await tesseractWorker.recognize(canvas);
+      const pass = parseModelSerial(data.text || '');
+      const words = data.words || [];
+      // A value is only accepted if Tesseract was actually confident about the
+      // characters it read. Without this gate a garbled pass can hand back
+      // something that merely looks code-shaped, and a wrong serial recorded
+      // against a unit is worse than a blank one — nobody re-checks a field
+      // that already looks filled in.
+      if (!guess.model && pass.model && isConfident(pass.model, words)) guess.model = pass.model;
+      if (!guess.serial && pass.serial && isConfident(pass.serial, words)) guess.serial = pass.serial;
+      if (guess.model && guess.serial) break;
+    }
+    return guess;
+  }
+
+  // True when the recognised value is backed by words Tesseract read with
+  // reasonable confidence. Values that came through a labelled anchor are
+  // trusted a little more readily than ones found by shape alone.
+  function isConfident(value, words, minConfidence) {
+    if (!words.length) return true; // no word data available; don't block the read
+    const threshold = minConfidence || 55;
+    const target = value.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+    for (const word of words) {
+      const text = (word.text || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+      if (!text) continue;
+      if (text === target || text.includes(target) || target.includes(text)) {
+        if ((word.confidence || 0) >= threshold) return true;
       }
     }
-    return n ? sum / n : 0;
+    return false;
   }
 
-  function captureSharpestFrame(video, count) {
-    return new Promise((resolve) => {
-      const frames = [];
-      const grab = () => {
-        frames.push(captureFrame(video));
-        if (frames.length >= count) {
-          frames.sort((a, b) => frameSharpness(b) - frameSharpness(a));
-          resolve(frames[0]);
-        } else {
-          setTimeout(grab, 90);
-        }
-      };
-      grab();
-    });
+  function grayToCanvas(gray, w, h) {
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    const out = ctx.createImageData(w, h);
+    for (let p = 0, i = 0; p < gray.length; p++, i += 4) {
+      out.data[i] = out.data[i + 1] = out.data[i + 2] = gray[p];
+      out.data[i + 3] = 255;
+    }
+    ctx.putImageData(out, 0, 0);
+    return canvas;
   }
 
-  // Builds the ordered list of OCR attempts for one captured frame. Ordering
-  // is from evidence on real nameplate photos: the adaptive rendition reads
-  // the widest range of plates, and a centre zoom rescues labels that are
-  // small in the frame. We stop at the first attempt that yields both fields,
-  // so a clean plate still costs a single pass.
-  function buildOcrAttempts(frame) {
+  // Adaptive (local mean) threshold via a summed-area table, so the cost is
+  // one pass regardless of window size.
+  function adaptiveThreshold(gray, w, h) {
+    const iw = w + 1;
+    const ii = new Uint32Array(iw * (h + 1));
+    for (let y = 0; y < h; y++) {
+      let rowSum = 0;
+      for (let x = 0; x < w; x++) {
+        rowSum += gray[y * w + x];
+        ii[(y + 1) * iw + (x + 1)] = ii[y * iw + (x + 1)] + rowSum;
+      }
+    }
+    const radius = Math.max(7, Math.round(Math.min(w, h) * 0.03));
+    const bias = 8;
+    const out = new Uint8ClampedArray(w * h);
+    for (let y = 0; y < h; y++) {
+      const y0 = Math.max(0, y - radius), y1 = Math.min(h, y + radius + 1);
+      for (let x = 0; x < w; x++) {
+        const x0 = Math.max(0, x - radius), x1 = Math.min(w, x + radius + 1);
+        const area = (y1 - y0) * (x1 - x0);
+        const sum = ii[y1 * iw + x1] - ii[y0 * iw + x1] - ii[y1 * iw + x0] + ii[y0 * iw + x0];
+        out[y * w + x] = gray[y * w + x] > sum / area - bias ? 255 : 0;
+      }
+    }
+    return out;
+  }
+
+  // Builds one rendition of a frame on demand. Each fails differently, which
+  // is what lets a later pass rescue a plate the first pass couldn't read.
+  function renderFor(frame, rendition) {
     const { gray, w, h } = frame;
-    const adaptive = grayToCanvas(adaptiveThreshold(gray, w, h), w, h);
-    const plain = grayToCanvas(gray, w, h);
+    if (rendition === 'plain') return grayToCanvas(gray, w, h);
+    if (rendition === 'adaptive') return grayToCanvas(adaptiveThreshold(gray, w, h), w, h);
 
-    // Centre region, re-thresholded on its own so the surrounding scene can't
-    // influence it, and scaled up for more pixels per character.
+    // 'centre': the middle of the shot, re-thresholded on its own so the
+    // surrounding scene can't influence it.
     const cx0 = Math.round(w * 0.05), cx1 = Math.round(w * 0.95);
-    const cy0 = Math.round(h * 0.25), cy1 = Math.round(h * 0.85);
-    const cwid = cx1 - cx0, chei = cy1 - cy0;
-    const centreGray = new Uint8ClampedArray(cwid * chei);
-    for (let y = 0; y < chei; y++) {
-      for (let x = 0; x < cwid; x++) {
-        centreGray[y * cwid + x] = gray[(y + cy0) * w + (x + cx0)];
-      }
+    const cy0 = Math.round(h * 0.20), cy1 = Math.round(h * 0.90);
+    const cw = cx1 - cx0, ch = cy1 - cy0;
+    const centreGray = new Uint8ClampedArray(cw * ch);
+    for (let y = 0; y < ch; y++) {
+      for (let x = 0; x < cw; x++) centreGray[y * cw + x] = gray[(y + cy0) * w + (x + cx0)];
     }
-    const centre = grayToCanvas(adaptiveThreshold(centreGray, cwid, chei), cwid, chei);
-
-    return [
-      { canvas: adaptive, psm: '6' },
-      { canvas: adaptive, psm: '3' },
-      { canvas: centre, psm: '3' },
-      { canvas: plain, psm: '6' },
-    ];
+    return grayToCanvas(adaptiveThreshold(centreGray, cw, ch), cw, ch);
   }
 
   function grayToCanvas(gray, w, h) {
