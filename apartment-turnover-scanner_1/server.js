@@ -464,6 +464,50 @@ async function readWithOcrSpace(buffer) {
   return { text: parsed.ParsedText || '', words };
 }
 
+// ---------------- Learned label shapes ----------------
+//
+// Nameplate layouts repeat: every A. O. Smith water heater in a complex
+// prints its model the same way. When the crew corrects a misread value, we
+// record the SHAPE of the correct one against that appliance type — letters
+// as A, digits as 9, separators kept ("ENL-50 120" becomes "AAA-99 999").
+// Shapes generalise across units where a remembered screen position could
+// not, since position changes with how the phone is held.
+//
+// Deliberately not stored: the values themselves as answers. The plate is
+// still read every time; the shapes only break ties between candidates.
+app.get('/api/patterns', async (req, res) => {
+  const itemName = String(req.query.itemName || '').trim();
+  if (!itemName) return res.json({ patterns: { model: [], serial: [] } });
+
+  const result = await pool.query(
+    `SELECT field, shape FROM label_patterns
+      WHERE lower(item_name) = lower($1)
+      ORDER BY times_seen DESC, updated_at DESC
+      LIMIT 12`,
+    [itemName]
+  );
+  const patterns = { model: [], serial: [] };
+  for (const row of result.rows) {
+    if (patterns[row.field]) patterns[row.field].push(row.shape);
+  }
+  res.json({ patterns });
+});
+
+app.post('/api/patterns', async (req, res) => {
+  const { itemName, field, shape, sample } = req.body || {};
+  if (!itemName || !['model', 'serial'].includes(field) || !shape) {
+    return res.status(400).json({ error: 'itemName, field (model|serial) and shape are required' });
+  }
+  await pool.query(
+    `INSERT INTO label_patterns (item_name, field, shape, sample)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (item_name, field, shape)
+     DO UPDATE SET times_seen = label_patterns.times_seen + 1, updated_at = now(), sample = EXCLUDED.sample`,
+    [String(itemName).trim(), field, String(shape), sample ? String(sample) : null]
+  );
+  res.json({ ok: true });
+});
+
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 
 const PORT = process.env.PORT || 3000;

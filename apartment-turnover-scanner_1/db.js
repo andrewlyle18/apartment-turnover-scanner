@@ -42,6 +42,22 @@ CREATE TABLE IF NOT EXISTS items (
 );
 
 CREATE INDEX IF NOT EXISTS idx_items_unit_id ON items(unit_id);
+
+-- Shapes learned from corrections the crew makes. When someone fixes a
+-- misread value, the SHAPE of the correct value is recorded against that
+-- appliance type ("Water Heater" model looks like AAA-99 999). On a job of
+-- 300 near-identical units the same plates recur constantly, so one
+-- correction improves every remaining unit.
+CREATE TABLE IF NOT EXISTS label_patterns (
+  id SERIAL PRIMARY KEY,
+  item_name TEXT NOT NULL,
+  field TEXT NOT NULL,
+  shape TEXT NOT NULL,
+  sample TEXT,
+  times_seen INTEGER NOT NULL DEFAULT 1,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (item_name, field, shape)
+);
 `;
 
 // Migrates a units table created before multi-project support existed:
@@ -101,12 +117,29 @@ async function migrateTrash(client) {
   await client.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS trashed_at TIMESTAMPTZ;`);
 }
 
+// Adds the learned-shape table to databases created before it existed.
+async function migrateLabelPatterns(client) {
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS label_patterns (
+      id SERIAL PRIMARY KEY,
+      item_name TEXT NOT NULL,
+      field TEXT NOT NULL,
+      shape TEXT NOT NULL,
+      sample TEXT,
+      times_seen INTEGER NOT NULL DEFAULT 1,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      UNIQUE (item_name, field, shape)
+    );
+  `);
+}
+
 async function initSchema() {
   const client = await pool.connect();
   try {
     await client.query(BASE_SCHEMA);
     await migrateToProjects(client);
     await migrateTrash(client);
+    await migrateLabelPatterns(client);
   } finally {
     client.release();
   }
