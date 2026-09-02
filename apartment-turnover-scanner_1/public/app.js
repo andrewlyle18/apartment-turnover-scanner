@@ -685,8 +685,20 @@
     return shapes.indexOf(shapeOf(value)) !== -1;
   }
 
+  // Normalised label context: the words immediately before a value on the
+  // plate, reduced so "Model Number", "MODEL NO." and "Model No:" compare
+  // equal. This is what lets a correction teach WHERE on the label to look.
+  function contextKey(text) {
+    return String(text || '').toLowerCase().replace(/[^a-z]/g, '').slice(-18);
+  }
+
+  const emptyLearned = () => ({
+    model: { prefer: [], avoid: [], contexts: [] },
+    serial: { prefer: [], avoid: [], contexts: [] },
+  });
+
   function parseModelSerial(text, learned) {
-    const shapes = learned || { model: [], serial: [] };
+    const shapes = learned && learned.model && learned.model.prefer ? learned : emptyLearned();
     const lines = text.split('\n').map((l) => l.replace(/\s+/g, ' ').trim()).filter(Boolean);
 
     // Words that appear ON nameplates but are never the code itself, so we
@@ -732,17 +744,44 @@
     // ("ENL-50 120"), which no amount of token-splitting recovers on its own.
     // A learned shape for this field authorises joining the next tokens — and
     // only a learned shape does, so nothing is glued together speculatively.
-    function pickValue(tokens, fieldShapes) {
+    // Every code-shaped token after a label is a candidate, including runs of
+    // tokens joined together ("ENL-50" + "120"). Candidates are scored rather
+    // than taking the first, because the first is exactly what gets it wrong
+    // on a crowded plate — and a score is what lets one correction from the
+    // crew outweigh the reading order.
+    function pickValue(tokens, learnedField, contextText) {
+      const field = learnedField || { prefer: [], avoid: [], contexts: [] };
+      const ctx = contextKey(contextText);
+      const contextKnown = field.contexts.length > 0 && field.contexts.some((c) => ctx.endsWith(c) || c.endsWith(ctx));
+
+      let best = null;
       for (let i = 0; i < tokens.length; i++) {
         if (!isCode(tokens[i], { requireLetter: false })) continue;
-        for (let extra = 3; extra >= 1; extra--) {
-          if (i + extra >= tokens.length) continue;
-          const joined = tokens.slice(i, i + 1 + extra).join(' ');
-          if (matchesLearnedShape(joined, fieldShapes)) return joined;
+
+        // The single token, plus each joined run starting at it.
+        const forms = [tokens[i]];
+        for (let extra = 1; extra <= 3 && i + extra < tokens.length; extra++) {
+          forms.push(tokens.slice(i, i + 1 + extra).join(' '));
         }
-        return tokens[i];
+
+        for (const value of forms) {
+          const shape = shapeOf(value);
+          let score = 0;
+          // A shape the crew has confirmed for this appliance is the
+          // strongest signal available; one they overwrote is a veto.
+          if (field.prefer.indexOf(shape) !== -1) score += 50;
+          if (field.avoid.indexOf(shape) !== -1) score -= 80;
+          // Following a label word this appliance is known to use.
+          if (contextKnown) score += 20;
+          // All else equal, the value nearest the label wins.
+          score -= i * 3;
+          // Prefer the single token unless a join was specifically learned.
+          if (value.includes(' ') && field.prefer.indexOf(shape) === -1) score -= 30;
+
+          if (!best || score > best.score) best = { value, score };
+        }
       }
-      return '';
+      return best && best.score > -40 ? best.value : '';
     }
 
     // Keyword positions. Matched loosely so English and French/Spanish
@@ -840,18 +879,20 @@
         const tokensA = tokensOf(segA);
         const tokensB = tokensOf(segB);
         if (firstIsModel) {
-          if (!model) model = pickValue(tokensA, shapes.model) || model;
-          if (!serial) serial = pickValue(tokensB, shapes.serial) || serial;
+          if (!model) model = pickValue(tokensA, shapes.model, segA) || model;
+          if (!serial) serial = pickValue(tokensB, shapes.serial, segB) || serial;
         } else {
-          if (!serial) serial = pickValue(tokensA, shapes.serial) || serial;
-          if (!model) model = pickValue(tokensB, shapes.model) || model;
+          if (!serial) serial = pickValue(tokensA, shapes.serial, segA) || serial;
+          if (!model) model = pickValue(tokensB, shapes.model, segB) || model;
         }
         continue;
       }
 
-      const tail = tokensOf(line.slice(mIdx !== -1 ? mIdx : sIdx));
-      if (mIdx !== -1 && !model) model = pickValue(tail, shapes.model) || model;
-      if (sIdx !== -1 && !serial) serial = pickValue(tail, shapes.serial) || serial;
+      const labelStart = mIdx !== -1 ? mIdx : sIdx;
+      const tail = tokensOf(line.slice(labelStart));
+      const context = line.slice(labelStart, labelStart + 24);
+      if (mIdx !== -1 && !model) model = pickValue(tail, shapes.model, context) || model;
+      if (sIdx !== -1 && !serial) serial = pickValue(tail, shapes.serial, context) || serial;
     }
 
     // Pass 2: stacked layouts, where the label is on its own line and the
@@ -882,9 +923,9 @@
           serial = nextCodes[0];
         }
       } else if (hasModel && !model) {
-        model = pickValue(tokensOf(next), shapes.model) || nextCodes[0];
+        model = pickValue(tokensOf(next), shapes.model, line) || nextCodes[0];
       } else if (hasSerial && !serial) {
-        serial = pickValue(tokensOf(next), shapes.serial) || nextCodes[0];
+        serial = pickValue(tokensOf(next), shapes.serial, line) || nextCodes[0];
       }
     }
 
@@ -907,6 +948,41 @@
       if (!model && candidates.length) model = candidates.shift();
       if (!serial && candidates.length) serial = candidates.shift();
     }
+
+    // Final pass: honour what the crew has taught, wherever the value came
+    // from. A value whose shape they have overwritten is dropped, and a
+    // value matching a learned shape found anywhere in the text beats one
+    // that matches nothing — this is what makes a single correction change
+    // the outcome on the next unit rather than only on an identical layout.
+    const allTokens = [];
+    for (const line of lines) {
+      const toks = tokensOf(line);
+      for (let i = 0; i < toks.length; i++) {
+        if (!isCode(toks[i], { requireLetter: false })) continue;
+        allTokens.push(toks[i]);
+        for (let extra = 1; extra <= 2 && i + extra < toks.length; extra++) {
+          allTokens.push(toks.slice(i, i + 1 + extra).join(' '));
+        }
+      }
+    }
+
+    const applyLearning = (value, field) => {
+      const learnedField = shapes[field];
+      if (!learnedField) return value;
+      const vetoed = value && learnedField.avoid.indexOf(shapeOf(value)) !== -1;
+      const alreadyGood = value && learnedField.prefer.indexOf(shapeOf(value)) !== -1;
+      if (alreadyGood) return value;
+      if (!vetoed && !learnedField.prefer.length) return value;
+
+      const other = field === 'model' ? serial : model;
+      const match = allTokens.find((t) => learnedField.prefer.indexOf(shapeOf(t)) !== -1 && t !== other);
+      if (match) return match;
+      return vetoed ? '' : value;
+    };
+
+    model = applyLearning(model, 'model');
+    serial = applyLearning(serial, 'serial');
+    if (model && model === serial) serial = '';
 
     return { model, serial, rawText: lines.join(' | ') };
   }
@@ -1052,6 +1128,9 @@
     // What the reader proposed, so that a value the user changed by hand can
     // be told apart from one they simply accepted.
     const proposed = { model: '', serial: '' };
+    // The text of the last read, so a hand-typed correction can be located
+    // on the plate and its surrounding label words learned.
+    let lastOcrText = '';
 
     function setFixTarget(target) {
       fixTarget = target;
@@ -1132,6 +1211,7 @@
     });
 
     function applyGuess(guess, emptyMessage) {
+      if (guess.sourceText) lastOcrText = guess.sourceText;
       if (guess.model) { modelField.value = guess.model; proposed.model = guess.model; }
       if (guess.serial) { serialField.value = guess.serial; proposed.serial = guess.serial; }
 
@@ -1167,18 +1247,42 @@
       flashGreen(() => goToNext());
     });
 
+    // Finds the label words a value follows in the OCR text, so a correction
+    // teaches not just what the value looks like but where on the plate it
+    // lives. "ENL-50 120" typed by hand becomes: this appliance's model is
+    // shaped AAA-99 999 and follows the words "Model Number".
+    function contextFor(value) {
+      if (!value || !lastOcrText) return null;
+      for (const line of lastOcrText.split('\n')) {
+        const at = line.toUpperCase().indexOf(value.toUpperCase());
+        if (at > 0) return contextKey(line.slice(Math.max(0, at - 24), at));
+      }
+      return null;
+    }
+
     function learnFromConfirmation(itemName, field, value, proposedValue) {
-      if (!value || value.length < 3) return;
-      const shape = shapeOf(value);
-      // Ignore shapes that describe nothing useful (a bare word, say) — they
-      // would match half the plate and make later reads worse, not better.
-      if (!/9/.test(shape) || shape.length < 4) return;
-      // Fire and forget: learning must never delay the crew moving on, and a
-      // failure here costs nothing but a missed lesson.
-      api('/api/patterns', {
-        method: 'POST',
-        body: JSON.stringify({ itemName, field, shape, sample: value }),
-      }).catch(() => {});
+      const post = (body) => api('/api/patterns', { method: 'POST', body: JSON.stringify(body) }).catch(() => {});
+      const usable = (v) => v && v.length >= 3 && /9/.test(shapeOf(v)) && shapeOf(v).length >= 4;
+      const corrected = value && proposedValue && value !== proposedValue;
+
+      if (usable(value)) {
+        post({
+          itemName, field, shape: shapeOf(value), sample: value,
+          contextLabel: contextFor(value),
+          // A correction is far stronger evidence than an acceptance: the
+          // crew looked at the plate and disagreed with the machine. Weighting
+          // it heavily is what makes one typed-in value actually change the
+          // next read, instead of being averaged away by passive confirmations.
+          weight: corrected ? 5 : 1,
+        });
+      }
+
+      // What they overwrote is recorded as a thing this field is not. Without
+      // this the same wrong candidate keeps winning on the next unit — the
+      // "120VAC as a serial" failure would simply repeat.
+      if (corrected && usable(proposedValue)) {
+        post({ itemName, field, shape: shapeOf(proposedValue), sample: proposedValue, rejected: true, weight: 3 });
+      }
     }
 
     function goToNext() {
@@ -1325,6 +1429,9 @@
     if (!resp.ok) throw new Error(`cloud OCR failed (${resp.status})`);
     const data = await resp.json();
     const guess = parseModelSerial(data.text || '', learnedShapes);
+    // The raw text is kept so a later hand-typed correction can be located on
+    // the plate and its surrounding label words learned.
+    guess.sourceText = data.text || '';
     // Keep the word positions (and the size they are relative to) so the app
     // can show which part of the photo each value was read from.
     guess.words = data.words || [];
@@ -1426,6 +1533,7 @@
         if (cloud.serial) guess.serial = cloud.serial;
         guess.modelBox = locateValue(cloud.model, cloud.words, cloud.sourceWidth, cloud.sourceHeight);
         guess.serialBox = locateValue(cloud.serial, cloud.words, cloud.sourceWidth, cloud.sourceHeight);
+        guess.sourceText = cloud.sourceText || '';
         if (guess.model && guess.serial) return guess;
         onProgress('Checking again on-device...');
       } catch (e) {
@@ -1445,6 +1553,7 @@
       await tesseractWorker.setParameters({ tessedit_pageseg_mode: tier.psm });
       const { data } = await tesseractWorker.recognize(canvas);
       const pass = parseModelSerial(data.text || '', learnedShapes);
+      if (!guess.sourceText) guess.sourceText = data.text || '';
       const words = data.words || [];
       // A value is only accepted if Tesseract was actually confident about the
       // characters it read. Without this gate a garbled pass can hand back
