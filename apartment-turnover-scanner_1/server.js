@@ -310,7 +310,8 @@ app.patch('/api/items/:id', async (req, res) => {
 async function fetchExportRows(projectId) {
   const result = await pool.query(
     `
-    SELECT u.unit_number, i.name, i.model, i.serial, i.status, i.scanned_by, i.scanned_at
+    SELECT u.unit_number, u.sort_order AS unit_sort, i.name, i.sort_order AS item_sort,
+           i.model, i.serial, i.status, i.scanned_by, i.scanned_at
     FROM units u
     JOIN items i ON i.unit_id = u.id
     WHERE u.project_id = $1
@@ -321,25 +322,77 @@ async function fetchExportRows(projectId) {
   return result.rows;
 }
 
+// A unit number encodes its location: the first digit is the building and
+// the second is the floor, so 1202 is building 1, floor 2. Units that don't
+// follow the pattern are kept rather than dropped — they group under a
+// separate heading so nothing silently vanishes from an export.
+function buildingOf(unitNumber) {
+  const m = String(unitNumber || '').trim().match(/^(\d)(\d)?/);
+  return m ? m[1] : null;
+}
+
+// Shapes scan results into the Appliance List layout: one column per
+// appliance, and two rows per unit — model numbers on the first, serials on
+// the second, exactly as the crew's existing sheets are laid out.
+function applianceTable(rows) {
+  // Column order follows the imported checklist order, not first-seen order,
+  // so every building's sheet has the same columns in the same places.
+  const columnOrder = new Map();
+  for (const r of rows) {
+    const seen = columnOrder.get(r.name);
+    if (seen === undefined || r.item_sort < seen) columnOrder.set(r.name, r.item_sort);
+  }
+  const columns = [...columnOrder.entries()].sort((a, b) => a[1] - b[1]).map((e) => e[0]);
+
+  const units = new Map();
+  for (const r of rows) {
+    if (!units.has(r.unit_number)) units.set(r.unit_number, { sort: r.unit_sort, items: new Map() });
+    units.get(r.unit_number).items.set(r.name, { model: r.model || '', serial: r.serial || '' });
+  }
+
+  const ordered = [...units.entries()].sort((a, b) => a[1].sort - b[1].sort);
+  const aoa = [['UNIT', '', ...columns]];
+  for (const [unitNumber, unit] of ordered) {
+    const cell = (name, field) => (unit.items.get(name) || {})[field] || '';
+    aoa.push([unitNumber, 'Model #', ...columns.map((c) => cell(c, 'model'))]);
+    aoa.push(['', 'Serial #', ...columns.map((c) => cell(c, 'serial'))]);
+  }
+  return aoa;
+}
+
+function groupByBuilding(rows) {
+  const buildings = new Map();
+  for (const r of rows) {
+    const key = buildingOf(r.unit_number) || 'Other';
+    if (!buildings.has(key)) buildings.set(key, []);
+    buildings.get(key).push(r);
+  }
+  return [...buildings.entries()].sort((a, b) => {
+    if (a[0] === 'Other') return 1;
+    if (b[0] === 'Other') return -1;
+    return Number(a[0]) - Number(b[0]);
+  });
+}
+
 app.get('/api/export.csv', async (req, res) => {
   const projectId = req.query.projectId ? parseInt(req.query.projectId, 10) : null;
   if (!projectId) return res.status(400).json({ error: 'projectId query param is required' });
   const rows = await fetchExportRows(projectId);
-  const header = ['Unit', 'Item', 'Model', 'Serial', 'Status', 'Scanned By', 'Scanned At'];
+
   const csvEscape = (v) => {
     const s = v === null || v === undefined ? '' : String(v);
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
-  const lines = [header.map(csvEscape).join(',')];
-  for (const r of rows) {
-    lines.push(
-      [r.unit_number, r.name, r.model, r.serial, r.status, r.scanned_by, r.scanned_at ? new Date(r.scanned_at).toISOString() : '']
-        .map(csvEscape)
-        .join(',')
-    );
+
+  const lines = [];
+  for (const [building, buildingRows] of groupByBuilding(rows)) {
+    lines.push(csvEscape(building === 'Other' ? 'OTHER UNITS' : `BLDG. ${building}`));
+    for (const row of applianceTable(buildingRows)) lines.push(row.map(csvEscape).join(','));
+    lines.push('');
   }
+
   res.setHeader('Content-Type', 'text/csv');
-  res.setHeader('Content-Disposition', 'attachment; filename="appliance-scan-export.csv"');
+  res.setHeader('Content-Disposition', 'attachment; filename="appliance-list.csv"');
   res.send(lines.join('\n'));
 });
 
@@ -347,165 +400,37 @@ app.get('/api/export.xlsx', async (req, res) => {
   const projectId = req.query.projectId ? parseInt(req.query.projectId, 10) : null;
   if (!projectId) return res.status(400).json({ error: 'projectId query param is required' });
   const rows = await fetchExportRows(projectId);
-  const data = rows.map((r) => ({
-    Unit: r.unit_number,
-    Item: r.name,
-    Model: r.model || '',
-    Serial: r.serial || '',
-    Status: r.status,
-    'Scanned By': r.scanned_by || '',
-    'Scanned At': r.scanned_at ? new Date(r.scanned_at).toISOString() : '',
-  }));
-  const worksheet = XLSX.utils.json_to_sheet(data);
+
   const workbook = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(workbook, worksheet, 'Export');
+  const grouped = groupByBuilding(rows);
+
+  if (!grouped.length) {
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([['No scans yet']]), 'Appliance List');
+  }
+
+  for (const [building, buildingRows] of grouped) {
+    const aoa = applianceTable(buildingRows);
+    const sheet = XLSX.utils.aoa_to_sheet(aoa);
+
+    // Column widths: the unit and label columns are narrow, the appliance
+    // columns hold model and serial strings and need the room.
+    sheet['!cols'] = aoa[0].map((_, i) => (i === 0 ? { wch: 9 } : i === 1 ? { wch: 9 } : { wch: 18 }));
+
+    // Merge each unit's number across its model and serial rows, so the unit
+    // reads as one block the way it does on the printed list.
+    sheet['!merges'] = [];
+    for (let r = 1; r < aoa.length; r += 2) {
+      sheet['!merges'].push({ s: { r, c: 0 }, e: { r: r + 1, c: 0 } });
+    }
+
+    const title = building === 'Other' ? 'Other units' : `BLDG. ${building}`;
+    XLSX.utils.book_append_sheet(workbook, sheet, title.replace(/[\\\/?*\[\]:]/g, '').slice(0, 31));
+  }
+
   const buffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-  res.setHeader('Content-Disposition', 'attachment; filename="appliance-scan-export.xlsx"');
+  res.setHeader('Content-Disposition', 'attachment; filename="appliance-list.xlsx"');
   res.send(buffer);
-});
-
-// ---------------- Cloud OCR (optional) ----------------
-//
-// Reading appliance nameplates with in-browser OCR tops out at a few seconds
-// per scan and still misses plates that are plainly legible to a person. A
-// cloud vision service reads them in a fraction of that, so the app uses one
-// when a key is configured and silently falls back to on-device OCR when it
-// isn't — no key, no behaviour change, nothing to break on site.
-//
-// Set exactly one of these in the Render dashboard:
-//   GOOGLE_VISION_API_KEY  — best accuracy; 1,000 scans/month free
-//   OCR_SPACE_API_KEY      — 25,000 scans/month free, no card required
-const GOOGLE_VISION_API_KEY = process.env.GOOGLE_VISION_API_KEY;
-const OCR_SPACE_API_KEY = process.env.OCR_SPACE_API_KEY;
-
-function ocrProvider() {
-  if (GOOGLE_VISION_API_KEY) return 'google';
-  if (OCR_SPACE_API_KEY) return 'ocrspace';
-  return null;
-}
-
-app.get('/api/ocr/status', (req, res) => {
-  res.json({ available: !!ocrProvider(), provider: ocrProvider() });
-});
-
-app.post('/api/ocr', upload.single('image'), async (req, res) => {
-  const provider = ocrProvider();
-  if (!provider) return res.status(503).json({ error: 'Cloud OCR is not configured' });
-  if (!req.file) return res.status(400).json({ error: 'No image uploaded' });
-
-  const started = Date.now();
-  try {
-    const result = provider === 'google'
-      ? await readWithGoogleVision(req.file.buffer)
-      : await readWithOcrSpace(req.file.buffer);
-    // `words` carries each recognised word's position in the uploaded image,
-    // so the app can show the user exactly where a value was read from.
-    res.json({ text: result.text, words: result.words, provider, ms: Date.now() - started });
-  } catch (e) {
-    // The client falls back to on-device OCR on any failure, so a flaky
-    // network or an exhausted quota degrades rather than blocks.
-    res.status(502).json({ error: e.message, provider });
-  }
-});
-
-async function readWithGoogleVision(buffer) {
-  const resp = await fetch(`https://vision.googleapis.com/v1/images:annotate?key=${GOOGLE_VISION_API_KEY}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      requests: [{
-        image: { content: buffer.toString('base64') },
-        features: [{ type: 'TEXT_DETECTION' }],
-      }],
-    }),
-  });
-  const json = await resp.json();
-  if (json.error) throw new Error(json.error.message || 'Vision API error');
-  const result = (json.responses && json.responses[0]) || {};
-  if (result.error) throw new Error(result.error.message || 'Vision API error');
-
-  // The first annotation is the full block; the rest are individual words.
-  const words = (result.textAnnotations || []).slice(1).map((a) => {
-    const xs = (a.boundingPoly.vertices || []).map((v) => v.x || 0);
-    const ys = (a.boundingPoly.vertices || []).map((v) => v.y || 0);
-    return {
-      text: a.description,
-      left: Math.min(...xs),
-      top: Math.min(...ys),
-      width: Math.max(...xs) - Math.min(...xs),
-      height: Math.max(...ys) - Math.min(...ys),
-    };
-  });
-  return { text: (result.fullTextAnnotation && result.fullTextAnnotation.text) || '', words };
-}
-
-async function readWithOcrSpace(buffer) {
-  const form = new FormData();
-  form.append('file', new Blob([buffer], { type: 'image/jpeg' }), 'label.jpg');
-  form.append('apikey', OCR_SPACE_API_KEY);
-  form.append('OCREngine', '2');
-  form.append('scale', 'true');
-  form.append('isOverlayRequired', 'true'); // returns per-word coordinates
-
-  const resp = await fetch('https://api.ocr.space/parse/image', { method: 'POST', body: form });
-  const json = await resp.json();
-  if (json.IsErroredOnProcessing) {
-    throw new Error([].concat(json.ErrorMessage || 'OCR service error').join(' '));
-  }
-  const parsed = (json.ParsedResults || [])[0] || {};
-  const words = [];
-  const overlayLines = (parsed.TextOverlay && parsed.TextOverlay.Lines) || [];
-  for (const line of overlayLines) {
-    for (const w of line.Words || []) {
-      words.push({ text: w.WordText, left: w.Left, top: w.Top, width: w.Width, height: w.Height });
-    }
-  }
-  return { text: parsed.ParsedText || '', words };
-}
-
-// ---------------- Learned label shapes ----------------
-//
-// Nameplate layouts repeat: every A. O. Smith water heater in a complex
-// prints its model the same way. When the crew corrects a misread value, we
-// record the SHAPE of the correct one against that appliance type — letters
-// as A, digits as 9, separators kept ("ENL-50 120" becomes "AAA-99 999").
-// Shapes generalise across units where a remembered screen position could
-// not, since position changes with how the phone is held.
-//
-// Deliberately not stored: the values themselves as answers. The plate is
-// still read every time; the shapes only break ties between candidates.
-app.get('/api/patterns', async (req, res) => {
-  const itemName = String(req.query.itemName || '').trim();
-  if (!itemName) return res.json({ patterns: { model: [], serial: [] } });
-
-  const result = await pool.query(
-    `SELECT field, shape FROM label_patterns
-      WHERE lower(item_name) = lower($1)
-      ORDER BY times_seen DESC, updated_at DESC
-      LIMIT 12`,
-    [itemName]
-  );
-  const patterns = { model: [], serial: [] };
-  for (const row of result.rows) {
-    if (patterns[row.field]) patterns[row.field].push(row.shape);
-  }
-  res.json({ patterns });
-});
-
-app.post('/api/patterns', async (req, res) => {
-  const { itemName, field, shape, sample } = req.body || {};
-  if (!itemName || !['model', 'serial'].includes(field) || !shape) {
-    return res.status(400).json({ error: 'itemName, field (model|serial) and shape are required' });
-  }
-  await pool.query(
-    `INSERT INTO label_patterns (item_name, field, shape, sample)
-     VALUES ($1, $2, $3, $4)
-     ON CONFLICT (item_name, field, shape)
-     DO UPDATE SET times_seen = label_patterns.times_seen + 1, updated_at = now(), sample = EXCLUDED.sample`,
-    [String(itemName).trim(), field, String(shape), sample ? String(sample) : null]
-  );
-  res.json({ ok: true });
 });
 
 app.get('/api/health', (req, res) => res.json({ ok: true }));
