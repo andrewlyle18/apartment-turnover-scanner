@@ -850,7 +850,11 @@
       statusEl.textContent = 'Reading label...';
       try {
         fullPhoto = await loadPhotoCanvas(file);
-        photoEl.src = fullPhoto.toDataURL('image/jpeg', 0.7);
+        // Display a downscaled copy. A full-resolution phone photo as a data
+        // URL is several megabytes of string held in memory, which is wasteful
+        // on a phone when it's only ever shown a few hundred pixels wide. The
+        // full-resolution canvas is kept for OCR and tap-to-read crops.
+        photoEl.src = previewDataUrl(fullPhoto);
         photoEl.hidden = false;
         placeholderEl.hidden = true;
         captureBtn.textContent = 'Retake photo';
@@ -939,6 +943,18 @@
 
     // Warm the OCR engine up while the user is framing their shot.
     ensureWorker().catch(() => {});
+  }
+
+  // A small on-screen copy of the captured photo.
+  function previewDataUrl(photo) {
+    const scale = Math.min(1, 1200 / Math.max(photo.width, photo.height));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(photo.width * scale);
+    canvas.height = Math.round(photo.height * scale);
+    const ctx = canvas.getContext('2d');
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(photo, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/jpeg', 0.7);
   }
 
   // Decodes a photo from the camera into a full-resolution canvas.

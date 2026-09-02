@@ -144,8 +144,35 @@ input[type="text"], input[type="file"] {
   display: flex;
   flex-direction: column;
 }
-.scan-video-wrap { position: relative; flex: 1; overflow: hidden; background: #000; }
-.scan-video-wrap video { width: 100%; height: 100%; object-fit: cover; }
+/* min-height:0 is load-bearing. A flex item defaults to min-height:auto,
+   which refuses to shrink below its content's intrinsic size — so a
+   full-resolution phone photo (3000px+ tall) blew this container past the
+   viewport and pushed the capture button and fields off the bottom of the
+   screen. */
+.scan-photo-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  background: #000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.scan-photo-wrap img {
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  display: block;
+  cursor: crosshair;
+}
+
+.scan-placeholder { color: #cfd2d8; text-align: center; padding: 24px; max-width: 340px; }
+.scan-placeholder-mark { font-size: 46px; margin-bottom: 10px; }
+.scan-placeholder p { margin: 6px 0; font-size: 15px; font-weight: 600; }
+.scan-placeholder-hint { font-weight: 400 !important; font-size: 13px !important; color: #8f949d; line-height: 1.45; }
 
 .scan-banner {
   position: absolute;
@@ -158,19 +185,10 @@ input[type="text"], input[type="file"] {
 .scan-banner .item-target { font-size: 22px; font-weight: 800; }
 .scan-banner .progress { font-size: 13px; opacity: 0.85; margin-top: 2px; }
 
-/* A loose framing hint only — the whole visible frame is what gets read,
-   so this just tells the user roughly where to aim. */
-.scan-guide {
-  position: absolute;
-  left: 4%; right: 4%; top: 14%; bottom: 10%;
-  border: 2px dashed rgba(255,255,255,0.5);
-  border-radius: 14px;
-  pointer-events: none;
-}
-
 .scan-status {
   position: absolute;
-  bottom: 190px; left: 0; right: 0;
+  bottom: 14px; left: 0; right: 0;
+  padding: 0 16px;
   text-align: center;
   color: white;
   font-size: 13px;
@@ -186,6 +204,7 @@ input[type="text"], input[type="file"] {
 .scan-flash.show { display: block; }
 
 .scan-controls {
+  flex: 0 0 auto;
   background: #111318;
   padding: 14px 16px calc(14px + env(safe-area-inset-bottom, 0px));
   display: flex;
