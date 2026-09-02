@@ -396,10 +396,12 @@ app.post('/api/ocr', upload.single('image'), async (req, res) => {
 
   const started = Date.now();
   try {
-    const text = provider === 'google'
+    const result = provider === 'google'
       ? await readWithGoogleVision(req.file.buffer)
       : await readWithOcrSpace(req.file.buffer);
-    res.json({ text, provider, ms: Date.now() - started });
+    // `words` carries each recognised word's position in the uploaded image,
+    // so the app can show the user exactly where a value was read from.
+    res.json({ text: result.text, words: result.words, provider, ms: Date.now() - started });
   } catch (e) {
     // The client falls back to on-device OCR on any failure, so a flaky
     // network or an exhausted quota degrades rather than blocks.
@@ -422,7 +424,20 @@ async function readWithGoogleVision(buffer) {
   if (json.error) throw new Error(json.error.message || 'Vision API error');
   const result = (json.responses && json.responses[0]) || {};
   if (result.error) throw new Error(result.error.message || 'Vision API error');
-  return (result.fullTextAnnotation && result.fullTextAnnotation.text) || '';
+
+  // The first annotation is the full block; the rest are individual words.
+  const words = (result.textAnnotations || []).slice(1).map((a) => {
+    const xs = (a.boundingPoly.vertices || []).map((v) => v.x || 0);
+    const ys = (a.boundingPoly.vertices || []).map((v) => v.y || 0);
+    return {
+      text: a.description,
+      left: Math.min(...xs),
+      top: Math.min(...ys),
+      width: Math.max(...xs) - Math.min(...xs),
+      height: Math.max(...ys) - Math.min(...ys),
+    };
+  });
+  return { text: (result.fullTextAnnotation && result.fullTextAnnotation.text) || '', words };
 }
 
 async function readWithOcrSpace(buffer) {
@@ -431,13 +446,22 @@ async function readWithOcrSpace(buffer) {
   form.append('apikey', OCR_SPACE_API_KEY);
   form.append('OCREngine', '2');
   form.append('scale', 'true');
+  form.append('isOverlayRequired', 'true'); // returns per-word coordinates
 
   const resp = await fetch('https://api.ocr.space/parse/image', { method: 'POST', body: form });
   const json = await resp.json();
   if (json.IsErroredOnProcessing) {
     throw new Error([].concat(json.ErrorMessage || 'OCR service error').join(' '));
   }
-  return ((json.ParsedResults || [])[0] || {}).ParsedText || '';
+  const parsed = (json.ParsedResults || [])[0] || {};
+  const words = [];
+  const overlayLines = (parsed.TextOverlay && parsed.TextOverlay.Lines) || [];
+  for (const line of overlayLines) {
+    for (const w of line.Words || []) {
+      words.push({ text: w.WordText, left: w.Left, top: w.Top, width: w.Width, height: w.Height });
+    }
+  }
+  return { text: parsed.ParsedText || '', words };
 }
 
 app.get('/api/health', (req, res) => res.json({ ok: true }));
