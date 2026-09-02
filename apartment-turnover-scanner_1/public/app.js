@@ -547,22 +547,108 @@
     return tesseractWorker;
   }
 
+  // Appliance nameplates vary a lot in layout: some put "Model: XYZ123" on
+  // one line, some put "MODEL NO." as its own header line with the actual
+  // code on the line below, and some print "MODEL NO." and "SERIAL NO." as
+  // a header row with both codes side-by-side on the next line. We try each
+  // pattern in order of confidence, then fall back to grabbing plausible
+  // alphanumeric codes if no label was recognized at all — the scan flow
+  // always requires the user to review before confirming, so an imperfect
+  // guess is safe and still faster than typing from scratch.
   function parseModelSerial(text) {
     const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
     let model = '';
     let serial = '';
-    const modelLabel = /\b(model|mod\.?|mod#|mdl)\b\s*[:#\.]?\s*([A-Za-z0-9\-\/]{3,})/i;
-    const serialLabel = /\b(serial|ser\.?|s\/?n)\b\s*[:#\.]?\s*([A-Za-z0-9\-\/]{3,})/i;
-    for (const line of lines) {
+
+    // A plausible model/serial code: letters+digits mixed (not a pure
+    // number like a ZIP code, and not a pure word), reasonably short.
+    const looksLikeCode = (s) =>
+      /^[A-Za-z0-9][A-Za-z0-9\-\/]{2,}$/.test(s) &&
+      /[0-9]/.test(s) &&
+      /[A-Za-z]/.test(s);
+
+    // "Model: ABC123" / "Model No. ABC123" / "Mdl# ABC123" all on one line.
+    const modelInline = /\b(model|mod\.?|mdl)\b\.?\s*(no\.?)?\s*[:#\.]?\s*([A-Za-z0-9][A-Za-z0-9\-\/]{2,})/i;
+    const serialInline = /\b(serial|ser\.?|s\/?n)\b\.?\s*(no\.?)?\s*[:#\.]?\s*([A-Za-z0-9][A-Za-z0-9\-\/]{2,})/i;
+    // A line that's just the label itself ("MODEL NO." with nothing after it) —
+    // the code is on the next line instead.
+    const modelLabelOnly = /^(model|mod\.?|mdl)\b\.?\s*(no\.?)?\s*[:#\.]?\s*$/i;
+    const serialLabelOnly = /^(serial|ser\.?|s\/?n)\b\.?\s*(no\.?)?\s*[:#\.]?\s*$/i;
+    // A header row that mentions both labels on one line, e.g.
+    // "MODEL NO.   SERIAL NO." — the actual codes are on the next line,
+    // side by side, in the same left-to-right order as the header.
+    const bothHeader = /\b(model|mod\.?|mdl)\b.*\b(serial|ser\.?|s\/?n)\b/i;
+
+    let firstLabelLineIdx = -1;
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const next = lines[i + 1];
+
+      if (firstLabelLineIdx === -1 && (modelInline.test(line) || serialInline.test(line) || modelLabelOnly.test(line) || serialLabelOnly.test(line) || bothHeader.test(line))) {
+        firstLabelLineIdx = i;
+      }
+
       if (!model) {
-        const m = line.match(modelLabel);
-        if (m) model = m[2];
+        const m = line.match(modelInline);
+        if (m && looksLikeCode(m[3])) {
+          model = m[3];
+        } else if (modelLabelOnly.test(line) && next && looksLikeCode(next)) {
+          model = next;
+        }
       }
       if (!serial) {
-        const s = line.match(serialLabel);
-        if (s) serial = s[2];
+        const s = line.match(serialInline);
+        if (s && looksLikeCode(s[3])) {
+          serial = s[3];
+        } else if (serialLabelOnly.test(line) && next && looksLikeCode(next)) {
+          serial = next;
+        }
+      }
+
+      // Two-column header row: "MODEL NO.   SERIAL NO." followed by a line
+      // with two codes side by side, e.g. "FMOS1746BSB   KG62210638".
+      if ((!model || !serial) && bothHeader.test(line) && next) {
+        const nextCodes = next.split(/\s+/).map((t) => t.replace(/[.,;:]+$/, '')).filter(looksLikeCode);
+        if (nextCodes.length >= 2) {
+          if (!model) model = nextCodes[0];
+          if (!serial) serial = nextCodes[1];
+        } else if (nextCodes.length === 1) {
+          // Only one code recognized on the row — assign it to whichever
+          // label comes first on the header line.
+          const modelIdx = line.search(/model|mod\.?|mdl/i);
+          const serialIdx = line.search(/serial|ser\.?|s\/?n/i);
+          if (modelIdx !== -1 && (serialIdx === -1 || modelIdx < serialIdx)) {
+            if (!model) model = nextCodes[0];
+          } else if (!serial) {
+            serial = nextCodes[0];
+          }
+        }
       }
     }
+
+    // Neither label matched anything usable — fall back to the first
+    // couple of plausible-looking codes found in the text. Restrict the
+    // scan to lines at or after the first model/serial label mention so
+    // boilerplate before it (manufacturer address, ZIP code, voltage/
+    // wattage ratings) doesn't get mistaken for the real codes.
+    if (!model || !serial) {
+      const used = new Set([model, serial].filter(Boolean));
+      const candidates = [];
+      const scanLines = firstLabelLineIdx !== -1 ? lines.slice(firstLabelLineIdx) : lines;
+      for (const line of scanLines) {
+        for (const token of line.split(/\s+/)) {
+          const cleaned = token.replace(/[.,;:]+$/, '');
+          if (looksLikeCode(cleaned) && cleaned.length >= 5 && !used.has(cleaned)) {
+            candidates.push(cleaned);
+            used.add(cleaned);
+          }
+        }
+      }
+      if (!model && candidates.length) model = candidates.shift();
+      if (!serial && candidates.length) serial = candidates.shift();
+    }
+
     return { model, serial, rawText: lines.join(' | ') };
   }
 
@@ -724,13 +810,48 @@
   // Crops the region under the on-screen dashed guide box from a single
   // full-resolution still frame (captured on tap, not continuously), and
   // returns a canvas ready for Tesseract.
+  //
+  // The guide box is positioned with CSS percentages against the on-screen
+  // video element, but the video is rendered with object-fit: cover, which
+  // scales and center-crops the raw camera frame to fill that element. The
+  // camera's native resolution/aspect ratio (e.g. a wide 16:9 sensor) is
+  // almost never the same as the on-screen box's aspect ratio (a tall phone
+  // viewport), so naively applying the guide box's percentages directly to
+  // videoWidth/videoHeight targets the wrong region of the raw frame — the
+  // box looks right on screen but the captured crop doesn't match it. We
+  // have to reproduce the same object-fit: cover math here to map the
+  // on-screen box back to raw video pixel coordinates.
   function captureGuideStill(video) {
     const vw = video.videoWidth;
     const vh = video.videoHeight;
-    const cropX = vw * 0.08;
-    const cropY = vh * 0.38;
-    const cropW = vw * 0.84;
-    const cropH = vh * 0.22;
+
+    // Guide box position as CSS percentages of the displayed video element —
+    // keep these in sync with the .scan-guide rule in styles.css.
+    const boxLeftPct = 0.08, boxTopPct = 0.38, boxWidthPct = 0.84, boxHeightPct = 0.22;
+
+    const rect = video.getBoundingClientRect();
+    const cw = rect.width;
+    const ch = rect.height;
+
+    // object-fit: cover scales the raw frame up until it fully covers the
+    // element, then center-crops the overflow.
+    const scale = Math.max(cw / vw, ch / vh);
+    const renderedW = vw * scale;
+    const renderedH = vh * scale;
+    const offsetX = (renderedW - cw) / 2;
+    const offsetY = (renderedH - ch) / 2;
+
+    // On-screen box, in the video element's own CSS pixel space.
+    const boxX = boxLeftPct * cw;
+    const boxY = boxTopPct * ch;
+    const boxW = boxWidthPct * cw;
+    const boxH = boxHeightPct * ch;
+
+    // Map that box back into raw source-frame pixels.
+    const cropX = (boxX + offsetX) / scale;
+    const cropY = (boxY + offsetY) / scale;
+    const cropW = boxW / scale;
+    const cropH = boxH / scale;
 
     // Keep full resolution from the crop region — this is a one-shot capture,
     // not a repeated loop, so we can afford the extra detail for accuracy.
