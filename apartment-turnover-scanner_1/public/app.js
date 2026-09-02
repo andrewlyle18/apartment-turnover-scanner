@@ -541,7 +541,10 @@
     tesseractWorker = await Tesseract.createWorker('eng');
     await tesseractWorker.setParameters({
       tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-/.: ',
-      tessedit_pageseg_mode: '6', // assume a uniform block of text
+      // Automatic page segmentation: we now hand Tesseract the whole visible
+      // frame rather than a tight crop, so let it find the text blocks
+      // itself instead of assuming one uniform block.
+      tessedit_pageseg_mode: '3',
     });
     workerReady = true;
     return tesseractWorker;
@@ -556,92 +559,121 @@
   // always requires the user to review before confirming, so an imperfect
   // guess is safe and still faster than typing from scratch.
   function parseModelSerial(text) {
-    const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+    const lines = text.split('\n').map((l) => l.replace(/\s+/g, ' ').trim()).filter(Boolean);
+
+    // Words that appear ON nameplates but are never the code itself, so we
+    // never mistake a label word for a value.
+    const STOPWORDS = /^(model|modele|modell|mod|mdl|serial|serie|series|ser|no|num|numero|type|volts?|amps?|hertz|hz|vac|watts?|made|in|de|du|la|le|and|inc|ltd|usa|canada|mexico|china|korea)$/i;
+
+    // A token that looks like an appliance code: alphanumeric (dashes and
+    // slashes allowed inside), at least 5 characters, containing at least
+    // one digit. When the token was found on a line that is explicitly
+    // labelled Model/Serial we accept all-digit codes too; when we are
+    // guessing from unlabelled text we additionally require a letter, so
+    // that ZIP codes, phone numbers, wattages and dates can't win.
+    function isCode(tok, opts) {
+      const requireLetter = !opts || opts.requireLetter !== false;
+      if (!/^[A-Za-z0-9][A-Za-z0-9\-\/]{4,}$/.test(tok)) return false;
+      if (!/[0-9]/.test(tok)) return false;
+      if (requireLetter && !/[A-Za-z]/.test(tok)) return false;
+      if (STOPWORDS.test(tok)) return false;
+      // Dates like 07/26 or 12/2025, and pure decimal readings.
+      if (/^\d{1,4}\/\d{1,4}$/.test(tok)) return false;
+      return true;
+    }
+
+    const tokensOf = (line) => line.split(/[\s,;]+/).map((t) => t.replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9\-\/]+$/g, '')).filter(Boolean);
+
+    // Keyword positions. Matched loosely so English and French/Spanish
+    // variants both hit: "Model No.", "No de Modele", "Modelo", "Serial No.",
+    // "No de Serie", "S/N".
+    const MODEL_KW = /\b(model|modelo|modele|modell|mdl|mod)\b|\bmodele\b/i;
+    const SERIAL_KW = /\b(serial|serie|series|s\/n|sn)\b/i;
+
     let model = '';
     let serial = '';
 
-    // A plausible model/serial code: letters+digits mixed (not a pure
-    // number like a ZIP code, and not a pure word), reasonably short.
-    const looksLikeCode = (s) =>
-      /^[A-Za-z0-9][A-Za-z0-9\-\/]{2,}$/.test(s) &&
-      /[0-9]/.test(s) &&
-      /[A-Za-z]/.test(s);
+    // Pass 1: for each line that names a field, take the first code-shaped
+    // token that appears after the keyword on that line. This handles
+    // "Model No. ABC123", "Model No./No de Modele: ABC123", "Modelo: ABC123"
+    // and "MODEL ABC123 SERIAL XYZ789" alike, without caring what
+    // punctuation or second-language text sits between label and value.
+    for (const line of lines) {
+      const mIdx = line.search(MODEL_KW);
+      const sIdx = line.search(SERIAL_KW);
+      if (mIdx === -1 && sIdx === -1) continue;
 
-    // "Model: ABC123" / "Model No. ABC123" / "Mdl# ABC123" all on one line.
-    const modelInline = /\b(model|mod\.?|mdl)\b\.?\s*(no\.?)?\s*[:#\.]?\s*([A-Za-z0-9][A-Za-z0-9\-\/]{2,})/i;
-    const serialInline = /\b(serial|ser\.?|s\/?n)\b\.?\s*(no\.?)?\s*[:#\.]?\s*([A-Za-z0-9][A-Za-z0-9\-\/]{2,})/i;
-    // A line that's just the label itself ("MODEL NO." with nothing after it) —
-    // the code is on the next line instead.
-    const modelLabelOnly = /^(model|mod\.?|mdl)\b\.?\s*(no\.?)?\s*[:#\.]?\s*$/i;
-    const serialLabelOnly = /^(serial|ser\.?|s\/?n)\b\.?\s*(no\.?)?\s*[:#\.]?\s*$/i;
-    // A header row that mentions both labels on one line, e.g.
-    // "MODEL NO.   SERIAL NO." — the actual codes are on the next line,
-    // side by side, in the same left-to-right order as the header.
-    const bothHeader = /\b(model|mod\.?|mdl)\b.*\b(serial|ser\.?|s\/?n)\b/i;
+      // If both labels are on one line, each label owns the codes that
+      // follow it up to the next label.
+      if (mIdx !== -1 && sIdx !== -1) {
+        const first = Math.min(mIdx, sIdx);
+        const firstIsModel = mIdx < sIdx;
+        const segA = line.slice(first, Math.max(mIdx, sIdx));
+        const segB = line.slice(Math.max(mIdx, sIdx));
+        const codesA = tokensOf(segA).filter((t) => isCode(t, { requireLetter: false }));
+        const codesB = tokensOf(segB).filter((t) => isCode(t, { requireLetter: false }));
+        if (firstIsModel) {
+          if (!model && codesA.length) model = codesA[0];
+          if (!serial && codesB.length) serial = codesB[0];
+        } else {
+          if (!serial && codesA.length) serial = codesA[0];
+          if (!model && codesB.length) model = codesB[0];
+        }
+        continue;
+      }
 
-    let firstLabelLineIdx = -1;
+      const codes = tokensOf(line.slice(mIdx !== -1 ? mIdx : sIdx)).filter((t) => isCode(t, { requireLetter: false }));
+      if (mIdx !== -1 && !model && codes.length) model = codes[0];
+      if (sIdx !== -1 && !serial && codes.length) serial = codes[0];
+    }
 
-    for (let i = 0; i < lines.length; i++) {
+    // Pass 2: stacked layouts, where the label is on its own line and the
+    // value sits on the line below — including the two-column header row
+    // ("MODEL NO.   SERIAL NO." above "ABC123   XYZ789").
+    for (let i = 0; i < lines.length && (!model || !serial); i++) {
       const line = lines[i];
       const next = lines[i + 1];
+      if (!next) break;
+      const hasModel = MODEL_KW.test(line);
+      const hasSerial = SERIAL_KW.test(line);
+      if (!hasModel && !hasSerial) continue;
+      // Only treat it as a stacked label if this line carries no value of
+      // its own (otherwise pass 1 already handled it).
+      if (tokensOf(line).some((t) => isCode(t, { requireLetter: false }))) continue;
 
-      if (firstLabelLineIdx === -1 && (modelInline.test(line) || serialInline.test(line) || modelLabelOnly.test(line) || serialLabelOnly.test(line) || bothHeader.test(line))) {
-        firstLabelLineIdx = i;
-      }
+      const nextCodes = tokensOf(next).filter((t) => isCode(t, { requireLetter: false }));
+      if (!nextCodes.length) continue;
 
-      if (!model) {
-        const m = line.match(modelInline);
-        if (m && looksLikeCode(m[3])) {
-          model = m[3];
-        } else if (modelLabelOnly.test(line) && next && looksLikeCode(next)) {
-          model = next;
-        }
-      }
-      if (!serial) {
-        const s = line.match(serialInline);
-        if (s && looksLikeCode(s[3])) {
-          serial = s[3];
-        } else if (serialLabelOnly.test(line) && next && looksLikeCode(next)) {
-          serial = next;
-        }
-      }
-
-      // Two-column header row: "MODEL NO.   SERIAL NO." followed by a line
-      // with two codes side by side, e.g. "FMOS1746BSB   KG62210638".
-      if ((!model || !serial) && bothHeader.test(line) && next) {
-        const nextCodes = next.split(/\s+/).map((t) => t.replace(/[.,;:]+$/, '')).filter(looksLikeCode);
+      if (hasModel && hasSerial) {
+        const modelFirst = line.search(MODEL_KW) < line.search(SERIAL_KW);
         if (nextCodes.length >= 2) {
-          if (!model) model = nextCodes[0];
-          if (!serial) serial = nextCodes[1];
-        } else if (nextCodes.length === 1) {
-          // Only one code recognized on the row — assign it to whichever
-          // label comes first on the header line.
-          const modelIdx = line.search(/model|mod\.?|mdl/i);
-          const serialIdx = line.search(/serial|ser\.?|s\/?n/i);
-          if (modelIdx !== -1 && (serialIdx === -1 || modelIdx < serialIdx)) {
-            if (!model) model = nextCodes[0];
-          } else if (!serial) {
-            serial = nextCodes[0];
-          }
+          if (!model) model = modelFirst ? nextCodes[0] : nextCodes[1];
+          if (!serial) serial = modelFirst ? nextCodes[1] : nextCodes[0];
+        } else if (modelFirst && !model) {
+          model = nextCodes[0];
+        } else if (!modelFirst && !serial) {
+          serial = nextCodes[0];
         }
+      } else if (hasModel && !model) {
+        model = nextCodes[0];
+      } else if (hasSerial && !serial) {
+        serial = nextCodes[0];
       }
     }
 
-    // Neither label matched anything usable — fall back to the first
-    // couple of plausible-looking codes found in the text. Restrict the
-    // scan to lines at or after the first model/serial label mention so
-    // boilerplate before it (manufacturer address, ZIP code, voltage/
-    // wattage ratings) doesn't get mistaken for the real codes.
+    // Pass 3: nothing was labelled (glare washed out the label words, or the
+    // plate uses icons). Fall back to the first code-shaped tokens in the
+    // text, requiring a letter-and-digit mix so address ZIPs, voltages and
+    // dates don't get picked. The user reviews every value before
+    // confirming, so a best guess here still beats an empty field.
     if (!model || !serial) {
       const used = new Set([model, serial].filter(Boolean));
       const candidates = [];
-      const scanLines = firstLabelLineIdx !== -1 ? lines.slice(firstLabelLineIdx) : lines;
-      for (const line of scanLines) {
-        for (const token of line.split(/\s+/)) {
-          const cleaned = token.replace(/[.,;:]+$/, '');
-          if (looksLikeCode(cleaned) && cleaned.length >= 5 && !used.has(cleaned)) {
-            candidates.push(cleaned);
-            used.add(cleaned);
+      for (const line of lines) {
+        for (const tok of tokensOf(line)) {
+          if (isCode(tok) && !used.has(tok)) {
+            candidates.push(tok);
+            used.add(tok);
           }
         }
       }
@@ -680,7 +712,7 @@
             <div class="item-target">${escapeHtml(item.name)}</div>
             <div class="progress">Item ${itemIndex + 1} of ${items.length} &middot; Unit ${escapeHtml(unitNumber)}</div>
           </div>
-          <div class="scan-status" id="scanStatus">Line up the label in the box, then tap Capture</div>
+          <div class="scan-status" id="scanStatus">Point at the label area, then tap Capture</div>
         </div>
         <div class="scan-controls">
           <div class="buttons">
@@ -731,7 +763,7 @@
       statusEl.textContent = 'Reading label...';
       try {
         await ensureWorker();
-        const stillCanvas = captureGuideStill(video);
+        const stillCanvas = captureFrame(video);
         const { data } = await tesseractWorker.recognize(stillCanvas);
         const guess = parseModelSerial(data.text || '');
         if (guess.model) modelField.value = guess.model;
@@ -807,58 +839,52 @@
     startCamera();
   }
 
-  // Crops the region under the on-screen dashed guide box from a single
-  // full-resolution still frame (captured on tap, not continuously), and
-  // returns a canvas ready for Tesseract.
+  // Captures everything currently visible in the camera view as a single
+  // full-resolution still (on tap, not continuously) and returns a canvas
+  // ready for Tesseract.
   //
-  // The guide box is positioned with CSS percentages against the on-screen
-  // video element, but the video is rendered with object-fit: cover, which
-  // scales and center-crops the raw camera frame to fill that element. The
-  // camera's native resolution/aspect ratio (e.g. a wide 16:9 sensor) is
-  // almost never the same as the on-screen box's aspect ratio (a tall phone
-  // viewport), so naively applying the guide box's percentages directly to
-  // videoWidth/videoHeight targets the wrong region of the raw frame — the
-  // box looks right on screen but the captured crop doesn't match it. We
-  // have to reproduce the same object-fit: cover math here to map the
-  // on-screen box back to raw video pixel coordinates.
-  function captureGuideStill(video) {
+  // We deliberately OCR the whole visible frame rather than a tight crop:
+  // the user should be able to point the phone at the general area of the
+  // nameplate and let the parser work out which strings are the model and
+  // serial, instead of having to line a small label up inside a box.
+  //
+  // The video is rendered with object-fit: cover, which scales and
+  // center-crops the raw camera frame to fill the element, so part of the
+  // raw frame is off-screen. We reproduce that same math here and capture
+  // exactly the on-screen region — what you see is what gets read.
+  function captureFrame(video) {
     const vw = video.videoWidth;
     const vh = video.videoHeight;
 
-    // Guide box position as CSS percentages of the displayed video element —
-    // keep these in sync with the .scan-guide rule in styles.css.
-    const boxLeftPct = 0.08, boxTopPct = 0.38, boxWidthPct = 0.84, boxHeightPct = 0.22;
-
     const rect = video.getBoundingClientRect();
-    const cw = rect.width;
-    const ch = rect.height;
+    const cw = rect.width || vw;
+    const ch = rect.height || vh;
 
     // object-fit: cover scales the raw frame up until it fully covers the
     // element, then center-crops the overflow.
     const scale = Math.max(cw / vw, ch / vh);
-    const renderedW = vw * scale;
-    const renderedH = vh * scale;
-    const offsetX = (renderedW - cw) / 2;
-    const offsetY = (renderedH - ch) / 2;
+    const offsetX = (vw * scale - cw) / 2;
+    const offsetY = (vh * scale - ch) / 2;
 
-    // On-screen box, in the video element's own CSS pixel space.
-    const boxX = boxLeftPct * cw;
-    const boxY = boxTopPct * ch;
-    const boxW = boxWidthPct * cw;
-    const boxH = boxHeightPct * ch;
+    // The full on-screen area, mapped back into raw source-frame pixels.
+    const cropX = offsetX / scale;
+    const cropY = offsetY / scale;
+    const cropW = cw / scale;
+    const cropH = ch / scale;
 
-    // Map that box back into raw source-frame pixels.
-    const cropX = (boxX + offsetX) / scale;
-    const cropY = (boxY + offsetY) / scale;
-    const cropW = boxW / scale;
-    const cropH = boxH / scale;
+    // Upscale small frames — Tesseract is markedly more accurate when
+    // character height is generous, and this is a one-shot capture so we
+    // can afford the pixels. Cap the long edge so OCR stays responsive.
+    let outScale = 1;
+    const longEdge = Math.max(cropW, cropH);
+    if (longEdge < 1600) outScale = 1600 / longEdge;
+    if (longEdge * outScale > 2400) outScale = 2400 / longEdge;
 
-    // Keep full resolution from the crop region — this is a one-shot capture,
-    // not a repeated loop, so we can afford the extra detail for accuracy.
     const canvas = document.createElement('canvas');
-    canvas.width = Math.round(cropW);
-    canvas.height = Math.round(cropH);
+    canvas.width = Math.round(cropW * outScale);
+    canvas.height = Math.round(cropH * outScale);
     const ctx = canvas.getContext('2d');
+    ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, canvas.width, canvas.height);
 
     // Grayscale + contrast boost to help OCR on embossed/dot-matrix nameplates.
