@@ -58,6 +58,17 @@ app.get('/api/projects/:id', async (req, res) => {
   res.json({ project: result.rows[0] });
 });
 
+app.patch('/api/projects/:id', async (req, res) => {
+  const name = String((req.body && req.body.name) || '').trim();
+  if (!name) return res.status(400).json({ error: 'Project name is required' });
+  const result = await pool.query(
+    'UPDATE projects SET name = $1 WHERE id = $2 RETURNING id, name, created_at',
+    [name, req.params.id]
+  );
+  if (!result.rows.length) return res.status(404).json({ error: 'Project not found' });
+  res.json({ project: result.rows[0] });
+});
+
 app.delete('/api/projects/:id', async (req, res) => {
   const result = await pool.query('DELETE FROM projects WHERE id = $1 RETURNING id', [req.params.id]);
   if (!result.rows.length) return res.status(404).json({ error: 'Project not found' });
