@@ -91,6 +91,10 @@
 
   // ---------------- Router ----------------
   let pollTimer = null;
+  // Set by the dashboard so its background refresh redraws the level the user
+  // is actually looking at. Cleared on navigation so a stale closure can never
+  // paint over a different screen.
+  let dashboardRefresh = null;
 
   function startPolling(fn) {
     stopPolling();
@@ -111,6 +115,7 @@
 
   async function route() {
     stopPolling();
+    dashboardRefresh = null;
     const hash = window.location.hash.slice(1);
 
     if (!hash || hash === '/') {
@@ -356,10 +361,7 @@
     drawDashboard(project, units, building, floor);
     startPolling(async () => {
       const fresh = await api(`/api/units?projectId=${projectId}`).then((d) => d.units);
-      const searchBox = document.getElementById('searchBox');
-      const currentFilter = searchBox ? searchBox.value : '';
-      updateDashboardStats(fresh);
-      renderUnitGrid(fresh, currentFilter);
+      if (dashboardRefresh) dashboardRefresh(fresh);
     });
   }
 
@@ -468,10 +470,13 @@
     const doneItems = units.reduce((s, u) => s + u.doneItems, 0);
 
     // Which slice of the job is on screen: the whole project, one building,
-    // or one floor of one building.
-    const inScope = units.filter((u) =>
+    // or one floor of one building. Kept as a function because the background
+    // refresh has to re-apply it — see dashboardRefresh at the end.
+    let currentUnits = units;
+    const scopeOf = (list) => list.filter((u) =>
       (building === undefined || buildingOfUnit(u.unitNumber) === building) &&
       (floor === undefined || floorOfUnit(u.unitNumber) === floor));
+    const inScope = scopeOf(currentUnits);
 
     const scopeUnits = inScope.length;
     const scopeComplete = inScope.filter((u) => u.complete).length;
@@ -530,17 +535,32 @@
     // hunting one unit shouldn't mean walking back down the hierarchy.
     document.getElementById('searchBox').addEventListener('input', (e) => {
       const term = e.target.value.trim();
-      if (term) renderUnitGrid(units.filter((u) => u.unitNumber.toLowerCase().includes(term.toLowerCase())), '');
+      if (term) renderUnitGrid(currentUnits.filter((u) => u.unitNumber.toLowerCase().includes(term.toLowerCase())), '');
       else drawLevel();
     });
 
+    // The five-second refresh used to redraw the flat list of every unit in
+    // the project, so a moment after opening a building the floor tiles were
+    // replaced by all 296 units and the stats reverted to project totals.
+    // A refresh now redraws whichever level is actually open.
+    dashboardRefresh = (fresh) => {
+      currentUnits = fresh;
+      updateDashboardStats(scopeOf(fresh));
+      const searchBox = document.getElementById('searchBox');
+      const term = searchBox ? searchBox.value.trim() : '';
+      if (term) renderUnitGrid(fresh.filter((u) => u.unitNumber.toLowerCase().includes(term.toLowerCase())), '');
+      else drawLevel();
+    };
+
     function drawLevel() {
       const grid = document.getElementById('unitGrid');
-      if (floor !== undefined) { renderUnitGrid(inScope, ''); return; }
+      if (!grid) return;
+      const scoped = scopeOf(currentUnits);
+      if (floor !== undefined) { renderUnitGrid(scoped, ''); return; }
 
       const groups = building === undefined
-        ? groupUnits(units, buildingOfUnit)
-        : groupUnits(inScope, floorOfUnit);
+        ? groupUnits(currentUnits, buildingOfUnit)
+        : groupUnits(scoped, floorOfUnit);
 
       grid.innerHTML = groups.map((g) => {
         const done = g.completeUnits === g.units.length;
