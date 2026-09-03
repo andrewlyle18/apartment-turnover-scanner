@@ -1,9 +1,20 @@
+/* Carter & Carter brand. The navy is sampled from the logo artwork itself
+   (#07354D) rather than eyeballed, with the silver of the brush mark as the
+   neutral. Navy carries the chrome and every primary action; green is kept
+   strictly for "complete", because a colour that means done should not also
+   be the colour of an ordinary button. */
 :root {
+  --brand: #07354D;
+  --brand-dark: #052637;
+  --brand-light: #0B4A6B;
+  --brand-tint: #E8EEF2;
+  --silver: #A8B0BC;
+
   --green: #1a9e4f;
   --green-dark: #147a3d;
   --yellow: #d99a00;
   --gray: #8a8f98;
-  --bg: #f4f5f7;
+  --bg: #f2f4f6;
   --card: #ffffff;
   --text: #1c1e21;
   --danger: #c0392b;
@@ -28,16 +39,34 @@ html, body {
   position: sticky;
   top: 0;
   z-index: 20;
-  background: #111318;
+  background: var(--brand);
   color: white;
   padding: 10px 14px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  justify-content: flex-start;
+  gap: 12px;
 }
 
-.topbar-title { font-weight: 700; font-size: 16px; }
+/* The logo is navy on transparent, which would disappear against the navy
+   bar, so it is knocked out to solid white — the standard treatment for a
+   dark ground. The silver of the brush mark is lost in the knockout, which
+   is why the full-colour logo is shown on the white project screens too. */
+.topbar-logo {
+  height: 30px;
+  width: auto;
+  display: block;
+  filter: brightness(0) invert(1);
+  opacity: 0.95;
+}
+
+.topbar-title {
+  font-weight: 700;
+  font-size: 16px;
+  letter-spacing: 0.2px;
+  padding-left: 12px;
+  border-left: 1px solid rgba(255,255,255,0.25);
+}
 
 .topbar-user input {
   background: #23262e;
@@ -51,7 +80,7 @@ html, body {
 
 main { flex: 1; padding: 14px; padding-bottom: 40px; max-width: 900px; margin: 0 auto; width: 100%; }
 
-h1 { font-size: 20px; margin: 4px 0 12px; }
+h1 { font-size: 20px; margin: 4px 0 12px; color: var(--brand); }
 h2 { font-size: 17px; margin: 0 0 10px; }
 p.help { color: #555; font-size: 14px; line-height: 1.5; }
 
@@ -72,8 +101,8 @@ button {
   font-weight: 600;
 }
 
-button.primary { background: var(--green); color: white; }
-button.primary:active { background: var(--green-dark); }
+button.primary { background: var(--brand); color: white; }
+button.primary:active { background: var(--brand-dark); }
 button.secondary { background: #e7e9ee; color: var(--text); }
 button.danger { background: var(--danger); color: white; }
 button:disabled { opacity: 0.5; cursor: default; }
@@ -93,7 +122,7 @@ input[type="text"], input[type="file"] {
 /* Dashboard */
 .stats { display: flex; gap: 16px; margin-bottom: 14px; flex-wrap: wrap; }
 .stat { background: var(--card); border-radius: var(--radius); padding: 12px 18px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
-.stat .num { font-size: 22px; font-weight: 800; }
+.stat .num { font-size: 22px; font-weight: 800; color: var(--brand); }
 .stat .label { font-size: 12px; color: #666; }
 
 .unit-grid {
@@ -116,6 +145,7 @@ input[type="text"], input[type="file"] {
 .unit-tile .unit-progress { font-size: 11px; color: #666; margin-top: 4px; }
 .unit-tile.complete { border-color: var(--green); background: #eafbf1; }
 .unit-tile.inprogress { border-color: var(--yellow); background: #fff9eb; }
+.unit-tile:not(.complete):not(.inprogress):hover { border-color: var(--brand-light); }
 .unit-tile .check { position: absolute; top: 4px; right: 6px; font-size: 14px; color: var(--green); }
 
 /* Item list */
@@ -206,7 +236,7 @@ input[type="text"], input[type="file"] {
 
 .scan-controls {
   flex: 0 0 auto;
-  background: #111318;
+  background: var(--brand-dark);
   padding: 14px 16px calc(14px + env(safe-area-inset-bottom, 0px));
   display: flex;
   flex-direction: column;
@@ -221,7 +251,7 @@ input[type="text"], input[type="file"] {
 .scan-controls .buttons { display: flex; gap: 10px; }
 .scan-controls .buttons button { flex: 1; }
 .scan-controls .close-row { display: flex; justify-content: space-between; align-items: center; }
-.scan-controls .close-row a { color: #aaa; font-size: 13px; text-decoration: underline; }
+.scan-controls .close-row a { color: var(--silver); font-size: 13px; text-decoration: underline; }
 
 .big-check {
   text-align: center;
@@ -272,7 +302,7 @@ input[type="text"], input[type="file"] {
 .project-delete { left: 4px; font-size: 14px; }
 .project-edit { left: 26px; }
 .project-delete:hover { background: var(--danger); color: white; }
-.project-edit:hover { background: var(--green); color: white; }
+.project-edit:hover { background: var(--brand); color: white; }
 .project-restore {
   position: absolute;
   top: 4px;
@@ -286,7 +316,7 @@ input[type="text"], input[type="file"] {
   color: #666;
   font-size: 13px;
 }
-.project-restore:hover { background: var(--green); color: white; }
+.project-restore:hover { background: var(--brand); color: white; }
 
 /* Custom confirm modal (avoids native window.confirm, which can hang
    automated/embedded browser contexts) */
@@ -315,7 +345,7 @@ input[type="text"], input[type="file"] {
   bottom: 20px;
   left: 50%;
   transform: translateX(-50%);
-  background: #111318;
+  background: var(--brand);
   color: white;
   padding: 10px 18px;
   border-radius: 20px;
@@ -351,10 +381,16 @@ input[type="text"], input[type="file"] {
 .fix-bar-label { color: #9aa0a9; font-size: 12px; }
 .fix-bar-buttons { display: flex; gap: 8px; }
 .fix-bar-buttons button { padding: 7px 12px; font-size: 13px; }
-.fix-bar-buttons button.armed { background: var(--green); color: white; }
+.fix-bar-buttons button.armed { background: var(--brand-light); color: white; }
 
 /* Building / floor breadcrumbs */
 .crumbs { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 12px; font-size: 13px; }
-.crumb { color: #4a6fa5; text-decoration: none; }
+.crumb { color: var(--brand-light); text-decoration: none; font-weight: 600; }
 .crumb.current { color: #555; font-weight: 600; }
 .crumb-sep { color: #b6bac1; }
+
+/* Full-colour brand mark on the light screens, where the navy wordmark and
+   the silver brush both read correctly. */
+.brand-header { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+.brand-header img { height: 44px; width: auto; display: block; }
+.brand-header .brand-rule { flex: 1; height: 1px; background: linear-gradient(to right, var(--brand-tint), transparent); }

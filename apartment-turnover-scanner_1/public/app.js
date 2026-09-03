@@ -178,6 +178,10 @@
     const projects = data.projects;
 
     root.innerHTML = `
+      <div class="brand-header">
+        <img src="/logo.png?v=1" alt="Carter &amp; Carter" />
+        <div class="brand-rule"></div>
+      </div>
       <div class="row between">
         <h1>Projects</h1>
         <div class="row" style="gap:8px;">
