@@ -48,16 +48,17 @@ html, body {
   gap: 12px;
 }
 
-/* The logo is navy on transparent, which would disappear against the navy
-   bar, so it is knocked out to solid white — the standard treatment for a
-   dark ground. The silver of the brush mark is lost in the knockout, which
-   is why the full-colour logo is shown on the white project screens too. */
+/* Only the brush mark goes in the bar. The full lockup stacks the mark above
+   the wordmark, so at bar height the wordmark shrinks to an illegible smear —
+   the mark alone stays recognisable. It is knocked out to white because the
+   navy artwork would otherwise disappear against the navy bar. */
 .topbar-logo {
-  height: 30px;
+  height: 26px;
   width: auto;
   display: block;
   filter: brightness(0) invert(1);
   opacity: 0.95;
+  flex: 0 0 auto;
 }
 
 .topbar-title {
@@ -286,7 +287,7 @@ input[type="text"], input[type="file"] {
 }
 
 /* Project tiles on cover page */
-.project-tile { cursor: pointer; }
+.project-tile { cursor: pointer; padding-top: 28px; }
 .project-delete, .project-edit {
   position: absolute;
   top: 4px;
@@ -392,5 +393,5 @@ input[type="text"], input[type="file"] {
 /* Full-colour brand mark on the light screens, where the navy wordmark and
    the silver brush both read correctly. */
 .brand-header { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
-.brand-header img { height: 44px; width: auto; display: block; }
+.brand-header img { height: 62px; width: auto; display: block; }
 .brand-header .brand-rule { flex: 1; height: 1px; background: linear-gradient(to right, var(--brand-tint), transparent); }
