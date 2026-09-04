@@ -1210,7 +1210,7 @@
       statusEl.textContent = 'Reading that spot...';
       try {
         const region = cropRegion(fullPhoto, relX, relY);
-        const guess = await readLabelFromCanvas(region, () => {});
+        const guess = await readLabelFromCanvas(region, (msg) => { statusEl.textContent = msg; });
         const value = fixTarget === 'serial'
           ? (guess.serial || guess.model)
           : (guess.model || guess.serial);
@@ -1346,6 +1346,24 @@
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(photo, 0, 0, canvas.width, canvas.height);
     return canvas.toDataURL('image/jpeg', 0.7);
+  }
+
+  // Rotates a canvas by a quarter turn. Appliance plates are constantly
+  // photographed sideways — a dishwasher label reads bottom-to-top on the door
+  // edge, a dryer's runs around the drum — and OCR engines only read
+  // horizontal text, so a perfectly sharp photo returns nothing at all.
+  function rotateCanvas(source, degrees) {
+    if (!degrees) return source;
+    const swap = degrees === 90 || degrees === 270;
+    const canvas = document.createElement('canvas');
+    canvas.width = swap ? source.height : source.width;
+    canvas.height = swap ? source.width : source.height;
+    const ctx = canvas.getContext('2d');
+    ctx.imageSmoothingQuality = 'high';
+    ctx.translate(canvas.width / 2, canvas.height / 2);
+    ctx.rotate((degrees * Math.PI) / 180);
+    ctx.drawImage(source, -source.width / 2, -source.height / 2);
+    return canvas;
   }
 
   // Decodes a photo from the camera into a full-resolution canvas.
@@ -1548,13 +1566,28 @@
     // on-device passes below, so scanning never hard-stops on site.
     if (await hasCloudOcr()) {
       try {
-        const cloud = await readLabelViaCloud(source);
-        if (cloud.model) guess.model = cloud.model;
-        if (cloud.serial) guess.serial = cloud.serial;
-        guess.modelBox = locateValue(cloud.model, cloud.words, cloud.sourceWidth, cloud.sourceHeight);
-        guess.serialBox = locateValue(cloud.serial, cloud.words, cloud.sourceWidth, cloud.sourceHeight);
-        guess.sourceText = cloud.sourceText || '';
-        if (guess.model && guess.serial) return guess;
+        // Upright first, then each quarter turn. A sideways plate returns
+        // nothing at 0° no matter how sharp the photo is, so the orientation
+        // sweep is what turns "couldn't read it" into a clean read — and it
+        // only costs extra calls on the labels that actually need it.
+        for (const degrees of [0, 90, 180, 270]) {
+          if (degrees) onProgress('Label looks sideways — rotating...');
+          const cloud = await readLabelViaCloud(rotateCanvas(source, degrees));
+          if (!guess.model && cloud.model) {
+            guess.model = cloud.model;
+            guess.modelBox = null; // boxes are drawn against the upright photo
+          }
+          if (!guess.serial && cloud.serial) {
+            guess.serial = cloud.serial;
+            guess.serialBox = null;
+          }
+          if (!guess.sourceText) guess.sourceText = cloud.sourceText || '';
+          if (degrees === 0) {
+            guess.modelBox = locateValue(cloud.model, cloud.words, cloud.sourceWidth, cloud.sourceHeight);
+            guess.serialBox = locateValue(cloud.serial, cloud.words, cloud.sourceWidth, cloud.sourceHeight);
+          }
+          if (guess.model && guess.serial) return guess;
+        }
         onProgress('Checking again on-device...');
       } catch (e) {
         onProgress('No signal for the fast reader — reading on-device...');
