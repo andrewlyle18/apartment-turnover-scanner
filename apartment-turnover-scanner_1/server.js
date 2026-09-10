@@ -445,6 +445,53 @@ app.get('/api/export.xlsx', async (req, res) => {
 //
 // Position on screen is deliberately NOT learned: it changes with how the
 // phone is held. Position within the label's own text does not.
+// ---------------- Project profile ----------------
+//
+// What this job has already confirmed, per appliance. Every unit in a complex
+// carries the same models, and each appliance's serials share one format, so
+// the scans already in the database are far better evidence than anything
+// inferred from a single photo. Two uses: steering the reader toward the
+// right-shaped serial, and catching a scan pointed at the wrong appliance.
+function shapeOfValue(value) {
+  return String(value || '').replace(/[A-Za-z]/g, 'A').replace(/[0-9]/g, '9');
+}
+
+app.get('/api/project-profile', async (req, res) => {
+  const projectId = req.query.projectId ? parseInt(req.query.projectId, 10) : null;
+  if (!projectId) return res.status(400).json({ error: 'projectId query param is required' });
+
+  const result = await pool.query(
+    `SELECT i.name, i.model, i.serial
+       FROM items i
+       JOIN units u ON u.id = i.unit_id
+      WHERE u.project_id = $1 AND i.status = 'done'`,
+    [projectId]
+  );
+
+  const byAppliance = new Map();
+  for (const row of result.rows) {
+    if (!byAppliance.has(row.name)) byAppliance.set(row.name, { models: new Map(), serialShapes: new Map() });
+    const entry = byAppliance.get(row.name);
+    const model = (row.model || '').trim();
+    const serial = (row.serial || '').trim();
+    if (model) entry.models.set(model, (entry.models.get(model) || 0) + 1);
+    if (serial) {
+      const shape = shapeOfValue(serial);
+      entry.serialShapes.set(shape, (entry.serialShapes.get(shape) || 0) + 1);
+    }
+  }
+
+  const tally = (map) => [...map.entries()]
+    .map(([value, count]) => ({ value, count }))
+    .sort((a, b) => b.count - a.count);
+
+  const appliances = {};
+  for (const [name, entry] of byAppliance) {
+    appliances[name] = { models: tally(entry.models), serialShapes: tally(entry.serialShapes) };
+  }
+  res.json({ appliances });
+});
+
 app.get('/api/patterns', async (req, res) => {
   const itemName = String(req.query.itemName || '').trim();
   const empty = () => ({
