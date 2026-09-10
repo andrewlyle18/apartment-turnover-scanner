@@ -39,6 +39,27 @@
     });
   }
 
+  // Like showConfirm, but with several named outcomes — used when a scan may
+  // belong to a different appliance and "yes/no" can't express the options.
+  function showChoice(message, options) {
+    return new Promise((resolve) => {
+      const overlay = document.createElement('div');
+      overlay.className = 'confirm-overlay';
+      overlay.innerHTML = `
+        <div class="confirm-box">
+          <p>${escapeHtml(message)}</p>
+          <div class="choice-buttons">
+            ${options.map((o, i) => `<button class="${i === 0 ? 'primary' : 'secondary'}" data-value="${escapeHtml(o.value)}">${escapeHtml(o.label)}</button>`).join('')}
+          </div>
+        </div>
+      `;
+      document.body.appendChild(overlay);
+      const done = (value) => { overlay.remove(); resolve(value); };
+      overlay.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => done(b.dataset.value)));
+      overlay.addEventListener('click', (e) => { if (e.target === overlay) done(null); });
+    });
+  }
+
   // Custom in-page text prompt (avoids native window.prompt() for the same
   // reason as showConfirm above). Resolves to the trimmed string, or null
   // if cancelled / left blank.
@@ -1061,6 +1082,7 @@
             <div>
               <label>MODEL</label>
               <input type="text" id="modelField" autocomplete="off" />
+              <button class="model-hint" id="modelHint" hidden></button>
             </div>
             <div>
               <label>SERIAL</label>
@@ -1257,6 +1279,14 @@
     document.getElementById('confirmBtn').addEventListener('click', async () => {
       const model = modelField.value.trim();
       const serial = serialField.value.trim();
+
+      // Check what's about to be saved against what this job already knows,
+      // before it becomes a row in the export. A wrong value caught here costs
+      // a tap; caught later it means walking back to the unit.
+      const proceed = await checkBeforeSaving(model, serial);
+      if (proceed === 'cancel') return;
+      if (proceed === 'reassigned') return;
+
       await saveItem(item.id, { model, serial, status: 'done', scannedBy: scannedBy() });
       // Learn from what the user actually confirmed. A value they corrected
       // teaches the most, but an accepted one is worth recording too — it is
@@ -1266,6 +1296,65 @@
       learnFromConfirmation(item.name, 'serial', serial, proposed.serial);
       flashGreen(() => goToNext());
     });
+
+    // Returns 'ok' to save here, 'cancel' to go back, or 'reassigned' when the
+    // scan has been filed against the appliance it actually belongs to.
+    async function checkBeforeSaving(model, serial) {
+      // 1. Does this model belong to a different appliance on this job?
+      //    This is the wrong-appliance catch: scanning the dryer while the
+      //    washer is on screen produces the dryer's model, and the job has
+      //    already recorded that model against the dryer on other units.
+      const owner = applianceOwningModel(model, item.name);
+      if (owner) {
+        const otherItem = items.find((i) => i.name === owner.name);
+        const choice = await showChoice(
+          `That model is the ${owner.name}'s — it matches the ${owner.name} on ${owner.count} other unit${owner.count === 1 ? '' : 's'}. This screen is the ${item.name}.`,
+          [
+            otherItem ? { label: `Save as ${owner.name}`, value: 'reassign' } : null,
+            { label: `Keep as ${item.name}`, value: 'keep' },
+            { label: 'Go back', value: 'cancel' },
+          ].filter(Boolean)
+        );
+        if (choice === 'cancel' || choice === null) return 'cancel';
+        if (choice === 'reassign' && otherItem) {
+          await saveItem(otherItem.id, { model, serial, status: 'done', scannedBy: scannedBy() });
+          learnFromConfirmation(owner.name, 'model', model, proposed.model);
+          learnFromConfirmation(owner.name, 'serial', serial, proposed.serial);
+          toast(`Saved to ${owner.name}. ${item.name} still needs scanning.`);
+          // Deliberately stays on this item rather than advancing: the
+          // appliance on screen has not been scanned yet.
+          modelField.value = '';
+          serialField.value = '';
+          statusEl.textContent = `Now scan the ${item.name}.`;
+          return 'reassigned';
+        }
+      }
+
+      // 2. Does the model differ from what every other unit carries?
+      const expected = expectedModelFor(item.name);
+      if (expected && model && model.replace(/[^A-Za-z0-9]/g, '').toUpperCase() !== expected.replace(/[^A-Za-z0-9]/g, '').toUpperCase()) {
+        const ok = await showConfirm(
+          `Every other ${item.name} on this job is ${expected}. This one reads ${model}. Save it anyway?`,
+          'Save anyway'
+        );
+        if (!ok) return 'cancel';
+      }
+
+      // 3. Does the serial match the format the other units use? Serials are
+      //    unique per unit, so only the SHAPE can be checked — which is
+      //    exactly what catches an unrelated number picked off the plate.
+      const format = serialFormatFor(item.name);
+      if (format && serial && shapeOf(serial) !== format) {
+        const example = ((projectProfile.appliances[item.name] || {}).serialShapes || [])[0];
+        const ok = await showConfirm(
+          `${item.name} serials on this job look like ${format.replace(/A/g, 'X').replace(/9/g, '0')} (${example ? example.count : 'several'} units). This one doesn't match that pattern. Save it anyway?`,
+          'Save anyway'
+        );
+        if (!ok) return 'cancel';
+      }
+
+      return 'ok';
+    }
 
     // Finds the label words a value follows in the OCR text, so a correction
     // teaches not just what the value looks like but where on the plate it
@@ -1330,10 +1419,25 @@
       }
     }
 
+    // Once the job has settled on a model for this appliance, offer it as a
+    // one-tap fill. Shown, never auto-filled: a wrong model silently copied
+    // across 296 units would be far worse than typing it.
+    function showModelHint() {
+      const expected = expectedModelFor(item.name);
+      const hint = document.getElementById('modelHint');
+      if (!hint || !expected || modelField.value.trim()) { if (hint) hint.hidden = true; return; }
+      hint.textContent = `Usually ${expected} — tap to use`;
+      hint.hidden = false;
+      hint.onclick = () => {
+        modelField.value = expected;
+        hint.hidden = true;
+      };
+    }
+
     // Warm the OCR engine up, and load anything already learned about this
     // appliance's plate format, while the user is framing their shot.
     ensureWorker().catch(() => {});
-    loadLearnedShapes(item.name);
+    loadLearnedShapes(item.name, projectId).then(showModelHint);
   }
 
   // A small on-screen copy of the captured photo.
@@ -1548,13 +1652,81 @@
   // Shapes learned for the appliance currently being scanned.
   let learnedShapes = { model: [], serial: [] };
 
-  async function loadLearnedShapes(itemName) {
+  // What this job has already confirmed, per appliance.
+  let projectProfile = { appliances: {} };
+
+  async function loadProjectProfile(projectId) {
+    try {
+      projectProfile = await api(`/api/project-profile?projectId=${projectId}`);
+    } catch (e) {
+      projectProfile = { appliances: {} };
+    }
+  }
+
+  async function loadLearnedShapes(itemName, projectId) {
     try {
       const data = await api(`/api/patterns?itemName=${encodeURIComponent(itemName)}`);
-      learnedShapes = data.patterns || { model: [], serial: [] };
+      learnedShapes = data.patterns || emptyLearned();
     } catch (e) {
-      learnedShapes = { model: [], serial: [] };
+      learnedShapes = emptyLearned();
     }
+
+    // Fold in the formats this job has actually confirmed. A serial format
+    // seen on two or more units of the same appliance is established fact,
+    // not a guess, and it outranks anything inferred from one photo — that is
+    // what stops a water heater's serial being read off some unrelated number
+    // elsewhere on the plate.
+    await loadProjectProfile(projectId);
+    const entry = (projectProfile.appliances || {})[itemName];
+    if (!entry) return;
+
+    for (const { value: shape, count } of entry.serialShapes || []) {
+      if (count >= 2 && learnedShapes.serial.prefer.indexOf(shape) === -1) {
+        learnedShapes.serial.prefer.unshift(shape);
+      }
+    }
+    for (const { value: model, count } of entry.models || []) {
+      const shape = shapeOf(model);
+      if (count >= 2 && learnedShapes.model.prefer.indexOf(shape) === -1) {
+        learnedShapes.model.prefer.unshift(shape);
+      }
+    }
+  }
+
+  // The model this appliance carries on every other unit, when the job is
+  // consistent about it. Used as a hint, never silently filled in.
+  function expectedModelFor(itemName) {
+    const entry = (projectProfile.appliances || {})[itemName];
+    if (!entry || !entry.models || !entry.models.length) return null;
+    const top = entry.models[0];
+    const total = entry.models.reduce((sum, m) => sum + m.count, 0);
+    // Only claim an expectation when the job agrees with itself.
+    return top.count >= 2 && top.count / total >= 0.8 ? top.value : null;
+  }
+
+  // Which OTHER appliance a model belongs to, if any. This is what catches a
+  // dryer scanned onto the washer.
+  function applianceOwningModel(model, exceptItemName) {
+    const target = String(model || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+    if (target.length < 4) return null;
+    for (const [name, entry] of Object.entries(projectProfile.appliances || {})) {
+      if (name === exceptItemName) continue;
+      for (const m of entry.models || []) {
+        if (m.count >= 2 && m.value.replace(/[^A-Za-z0-9]/g, '').toUpperCase() === target) {
+          return { name, count: m.count };
+        }
+      }
+    }
+    return null;
+  }
+
+  // Whether a serial looks like the others recorded for this appliance.
+  function serialFormatFor(itemName) {
+    const entry = (projectProfile.appliances || {})[itemName];
+    if (!entry || !entry.serialShapes || !entry.serialShapes.length) return null;
+    const top = entry.serialShapes[0];
+    const total = entry.serialShapes.reduce((sum, sh) => sum + sh.count, 0);
+    return top.count >= 3 && top.count / total >= 0.75 ? top.value : null;
   }
 
   async function readLabelFromCanvas(source, onProgress) {
