@@ -205,10 +205,9 @@ input[type="text"], input[type="file"] {
   cursor: crosshair;
 }
 
-.scan-placeholder { color: #cfd2d8; text-align: center; padding: 24px; max-width: 340px; }
-.scan-placeholder-mark { font-size: 46px; margin-bottom: 10px; }
-.scan-placeholder p { margin: 6px 0; font-size: 15px; font-weight: 600; }
-.scan-placeholder-hint { font-weight: 400 !important; font-size: 13px !important; color: #8f949d; line-height: 1.45; }
+.scan-placeholder { color: #aeb6bf; text-align: center; padding: 24px; }
+.scan-placeholder-mark { font-size: 42px; margin-bottom: 8px; opacity: 0.75; }
+.scan-placeholder p { margin: 0; font-size: 15px; font-weight: 600; }
 
 .scan-banner {
   position: absolute;
@@ -218,7 +217,7 @@ input[type="text"], input[type="file"] {
   color: white;
   text-align: center;
 }
-.scan-banner .item-target { font-size: 22px; font-weight: 800; }
+.scan-banner .item-target { font-size: 20px; font-weight: 800; }
 .scan-banner .progress { font-size: 13px; opacity: 0.85; margin-top: 2px; }
 
 .scan-status {
@@ -249,12 +248,36 @@ input[type="text"], input[type="file"] {
 }
 .scan-controls .fields { display: flex; gap: 8px; }
 .scan-controls .fields > div { flex: 1; }
-.scan-controls label { color: #aaa; font-size: 11px; display: block; margin-bottom: 3px; }
+.scan-controls label { color: #8e99a3; font-size: 10px; letter-spacing: 0.6px; display: block; margin-bottom: 3px; }
 .scan-controls input {
   background: #23262e; border: 1px solid #3a3e47; color: white; width: 100%;
 }
 .scan-controls .buttons { display: flex; gap: 10px; }
 .scan-controls .buttons button { flex: 1; }
+
+/* One colour across the whole panel, so the eye has a single place to land:
+   the capture button. Everything else is the same muted navy, present but
+   not competing. */
+.scan-controls button.quiet {
+  background: rgba(255,255,255,0.09);
+  color: #dfe5ea;
+  border: 1px solid rgba(255,255,255,0.16);
+}
+.scan-controls button.quiet:active { background: rgba(255,255,255,0.18); }
+.scan-controls button.quiet.armed { background: rgba(255,255,255,0.28); color: #fff; }
+
+/* The one thing that stands out. */
+.capture-btn {
+  background: #ffffff;
+  color: var(--brand);
+  font-size: 17px;
+  font-weight: 800;
+  padding: 15px 16px;
+  letter-spacing: 0.2px;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.28);
+}
+.capture-btn:active { background: #e8eef2; }
+.capture-btn:disabled { background: rgba(255,255,255,0.45); color: var(--brand-dark); }
 .scan-controls .close-row { display: flex; justify-content: space-between; align-items: center; }
 .scan-controls .close-row a { color: var(--silver); font-size: 13px; text-decoration: underline; }
 
@@ -382,11 +405,10 @@ input[type="text"], input[type="file"] {
 .scan-box-serial span { background: #2f7fd9; }
 
 /* "Wrong value? tap it" bar */
-.fix-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
-.fix-bar-label { color: #9aa0a9; font-size: 12px; }
-.fix-bar-buttons { display: flex; gap: 8px; }
-.fix-bar-buttons button { padding: 7px 12px; font-size: 13px; }
-.fix-bar-buttons button.armed { background: var(--brand-light); color: white; }
+.fix-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.fix-bar-label { color: #8e99a3; font-size: 11px; }
+.fix-bar-buttons { display: flex; gap: 6px; }
+.fix-bar-buttons button { padding: 5px 12px; font-size: 12px; border-radius: 8px; }
 
 /* Building / floor breadcrumbs */
 .crumbs { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 12px; font-size: 13px; }

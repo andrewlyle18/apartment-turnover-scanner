@@ -463,6 +463,16 @@
   const buildingOfUnit = (n) => { const m = String(n || '').trim().match(/^(\d)/); return m ? m[1] : 'Other'; };
   const floorOfUnit = (n) => { const m = String(n || '').trim().match(/^\d(\d)/); return m ? m[1] : 'Other'; };
 
+  // The floor a unit sits on, as a route. Finishing 5111 should return you to
+  // building 5, floor 1 — the list you were working through — not to the top
+  // of the job, which costs three taps to get back down.
+  function floorRouteFor(projectId, unitNumber) {
+    const building = buildingOfUnit(unitNumber);
+    const floor = floorOfUnit(unitNumber);
+    if (building === 'Other' || floor === 'Other') return `/project/${projectId}`;
+    return `/project/${projectId}/b/${encodeURIComponent(building)}/f/${encodeURIComponent(floor)}`;
+  }
+
   // Rolls a set of units into groups with their own progress totals, so a
   // building or floor tile shows how much of it is done — the thing a super
   // actually wants to know before walking over there.
@@ -643,7 +653,7 @@
     root.innerHTML = `
       <div class="row between">
         <h1>Unit ${escapeHtml(unit.unitNumber)}</h1>
-        <button class="secondary" id="backBtn">&larr; All units</button>
+        <button class="secondary" id="backBtn">&larr; Back</button>
       </div>
       <div class="card">
         <div class="row between" style="margin-bottom:10px;">
@@ -657,7 +667,7 @@
       ${complete ? `<div class="card big-check"><div class="mark">&#10003;</div><div>Unit ${escapeHtml(unit.unitNumber)} complete</div></div>` : ''}
     `;
 
-    document.getElementById('backBtn').addEventListener('click', () => navigate(`/project/${projectId}`));
+    document.getElementById('backBtn').addEventListener('click', () => navigate(floorRouteFor(projectId, unit.unitNumber)));
 
     const list = document.getElementById('itemList');
     list.innerHTML = unit.items.map((item, idx) => `
@@ -1056,8 +1066,7 @@
           </div>
           <div class="scan-placeholder" id="scanPlaceholder">
             <div class="scan-placeholder-mark">&#128247;</div>
-            <p>Take a photo of the nameplate</p>
-            <p class="scan-placeholder-hint">Get close enough that the model and serial fill most of the frame. Use your camera's flash if the label is in the dark.</p>
+            <p>Photograph the nameplate</p>
           </div>
           <div class="scan-flash" id="scanFlash"></div>
           <div class="scan-banner">
@@ -1068,15 +1077,15 @@
         </div>
         <div class="scan-controls">
           <input type="file" accept="image/*" capture="environment" id="photoInput" hidden />
-          <div class="fix-bar" id="fixBar" hidden>
-            <span class="fix-bar-label">Wrong value? Tap it on the photo to fix:</span>
-            <div class="fix-bar-buttons">
-              <button class="secondary" id="fixModelBtn">Fix MODEL</button>
-              <button class="secondary" id="fixSerialBtn">Fix SERIAL</button>
-            </div>
-          </div>
           <div class="buttons">
-            <button class="primary" id="captureBtn">Take photo</button>
+            <button class="capture-btn" id="captureBtn">Take photo</button>
+          </div>
+          <div class="fix-bar" id="fixBar" hidden>
+            <span class="fix-bar-label">Wrong? Tap it on the photo:</span>
+            <div class="fix-bar-buttons">
+              <button class="quiet" id="fixModelBtn">Model</button>
+              <button class="quiet" id="fixSerialBtn">Serial</button>
+            </div>
           </div>
           <div class="fields">
             <div>
@@ -1090,8 +1099,8 @@
             </div>
           </div>
           <div class="buttons">
-            <button class="secondary" id="skipBtn">Skip</button>
-            <button class="primary" id="confirmBtn">Confirm &amp; Next</button>
+            <button class="quiet" id="skipBtn">Skip</button>
+            <button class="quiet" id="confirmBtn">Confirm &amp; Next</button>
           </div>
           <div class="close-row">
             <a href="#" id="exitScan">&larr; Exit to unit</a>
@@ -1338,6 +1347,20 @@
           'Save anyway'
         );
         if (!ok) return 'cancel';
+      }
+
+      // 2b. For an appliance whose model varies per unit (the AHU), the value
+      //     can't be checked but the format can — a model of the wrong shape
+      //     is still a misread.
+      if (!expected && model) {
+        const modelFormat = modelFormatFor(item.name);
+        if (modelFormat && shapeOf(model) !== modelFormat) {
+          const ok = await showConfirm(
+            `${item.name} models on this job look like ${modelFormat.replace(/A/g, 'X').replace(/9/g, '0')}. This one doesn't match that pattern. Save it anyway?`,
+            'Save anyway'
+          );
+          if (!ok) return 'cancel';
+        }
       }
 
       // 3. Does the serial match the format the other units use? Serials are
@@ -1720,6 +1743,19 @@
     return null;
   }
 
+  // The format an appliance's model takes, for the ones that vary per unit.
+  // An AHU's model is different in every apartment but always the same shape,
+  // so the value can't be checked while the shape still can.
+  function modelFormatFor(itemName) {
+    const entry = (projectProfile.appliances || {})[itemName];
+    if (!entry || !entry.models || !entry.models.length) return null;
+    const shapes = new Map();
+    for (const m of entry.models) shapes.set(shapeOf(m.value), (shapes.get(shapeOf(m.value)) || 0) + m.count);
+    const ranked = [...shapes.entries()].sort((a, b) => b[1] - a[1]);
+    const total = ranked.reduce((sum, r) => sum + r[1], 0);
+    return ranked[0][1] >= 3 && ranked[0][1] / total >= 0.75 ? ranked[0][0] : null;
+  }
+
   // Whether a serial looks like the others recorded for this appliance.
   function serialFormatFor(itemName) {
     const entry = (projectProfile.appliances || {})[itemName];
@@ -1920,11 +1956,11 @@
         <div class="mark">&#10003;</div>
         <div>Unit ${escapeHtml(unitNumber)} complete</div>
         <div class="row" style="justify-content:center;margin-top:14px;">
-          <button class="primary" id="doneBtn">Back to unit list</button>
+          <button class="primary" id="doneBtn">Next unit &rarr;</button>
         </div>
       </div>
     `;
-    document.getElementById('doneBtn').addEventListener('click', () => navigate(`/project/${projectId}`));
+    document.getElementById('doneBtn').addEventListener('click', () => navigate(floorRouteFor(projectId, unitNumber)));
   }
 
   function escapeHtml(str) {
