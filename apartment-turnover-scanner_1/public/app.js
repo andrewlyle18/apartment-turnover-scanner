@@ -1100,7 +1100,7 @@
           </div>
           <div class="buttons">
             <button class="quiet" id="skipBtn">Skip</button>
-            <button class="quiet" id="confirmBtn">Confirm &amp; Next</button>
+            <button class="go-btn" id="confirmBtn">Confirm &amp; Next</button>
           </div>
           <div class="close-row">
             <a href="#" id="exitScan">&larr; Exit to unit</a>
