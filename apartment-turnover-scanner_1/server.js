@@ -41,7 +41,7 @@ app.use('/api', (req, res, next) => {
 
 // Commitments, change orders and pay applications. Administrators only,
 // apart from the token routes inside.
-mountBillingRoutes(app, { adminOnly });
+mountBillingRoutes(app, { adminOnly, upload });
 
 // ---------- Projects ----------
 async function loadProjectsWithStats(whereClause) {
@@ -100,13 +100,28 @@ app.post('/api/projects', adminOnly, async (req, res) => {
 });
 
 app.get('/api/projects/:id', async (req, res) => {
-  const result = await pool.query('SELECT id, name, created_at, trashed_at FROM projects WHERE id = $1', [req.params.id]);
+  const result = await pool.query(
+    'SELECT id, name, address1, address2, created_at, trashed_at FROM projects WHERE id = $1', [req.params.id]);
   if (!result.rows.length) return res.status(404).json({ error: 'Project not found' });
   res.json({ project: result.rows[0] });
 });
 
 app.patch('/api/projects/:id', adminOnly, async (req, res) => {
-  const name = String((req.body && req.body.name) || '').trim();
+  const body = req.body || {};
+
+  // The job's address, which the change order document prints. Set from the
+  // billing screens; it isn't part of scanning.
+  if (body.name === undefined && (body.address1 !== undefined || body.address2 !== undefined)) {
+    const updated = await pool.query(
+      `UPDATE projects SET address1 = $1, address2 = $2 WHERE id = $3
+       RETURNING id, name, address1, address2, created_at`,
+      [String(body.address1 || '').trim() || null, String(body.address2 || '').trim() || null, req.params.id]
+    );
+    if (!updated.rows.length) return res.status(404).json({ error: 'Project not found' });
+    return res.json({ project: updated.rows[0] });
+  }
+
+  const name = String(body.name || '').trim();
   if (!name) return res.status(400).json({ error: 'Project name is required' });
   const result = await pool.query(
     'UPDATE projects SET name = $1 WHERE id = $2 RETURNING id, name, created_at',

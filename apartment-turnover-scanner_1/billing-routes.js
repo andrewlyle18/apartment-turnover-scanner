@@ -1,6 +1,8 @@
 const { pool } = require('./db');
+const { buildChangeOrderPdf } = require('./change-order-pdf');
 const {
   applicationView,
+  changeOrderContext,
   previousCertificatesFor,
   computePayApp,
   loadApplication,
@@ -14,7 +16,7 @@ const {
 const trim = (v) => String(v === undefined || v === null ? '' : v).trim();
 const numberOrNull = (v) => (v === '' || v === null || v === undefined ? null : Number(v));
 
-function mountBillingRoutes(app, { adminOnly }) {
+function mountBillingRoutes(app, { adminOnly, upload }) {
   // ---------- Commitments ----------
 
   app.get('/api/commitments', adminOnly, async (req, res) => {
@@ -228,6 +230,13 @@ function mountBillingRoutes(app, { adminOnly }) {
       if (b.reason !== undefined) set('reason', trim(b.reason) || null);
       if (b.location !== undefined) set('location', trim(b.location) || null);
       if (b.amount !== undefined) set('amount', Number(b.amount));
+      if (b.revision !== undefined) set('revision', parseInt(b.revision, 10) || 0);
+      if (b.accountingMethod !== undefined) set('accounting_method', trim(b.accountingMethod) || 'Amount Based');
+      if (b.scheduleImpactDays !== undefined) set('schedule_impact_days', parseInt(b.scheduleImpactDays, 10) || 0);
+      if (b.dueDate !== undefined) set('due_date', b.dueDate || null);
+      if (b.requestedFrom !== undefined) set('requested_from', trim(b.requestedFrom) || null);
+      if (b.reviewedBy !== undefined) set('reviewed_by', trim(b.reviewedBy) || null);
+      if (b.finalReviewer !== undefined) set('final_reviewer', trim(b.finalReviewer) || null);
       if (b.retainagePct !== undefined) set('retainage_pct', numberOrNull(b.retainagePct));
       if (b.status !== undefined) {
         set('status', b.status);
@@ -295,6 +304,112 @@ function mountBillingRoutes(app, { adminOnly }) {
     } finally {
       client.release();
     }
+  });
+
+  // ---------- One change order, in full ----------
+
+  app.get('/api/change-orders/:id', adminOnly, async (req, res) => {
+    const context = await changeOrderContext(parseInt(req.params.id, 10));
+    if (!context) return res.status(404).json({ error: 'Change order not found' });
+    res.json(context);
+  });
+
+  // The change order's own lines. Its amount is their total — there is no
+  // separate figure to fall out of step.
+  app.put('/api/change-orders/:id/lines', adminOnly, async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    const rows = Array.isArray(req.body && req.body.lines) ? req.body.lines : [];
+
+    const existing = await pool.query('SELECT status FROM change_orders WHERE id = $1', [id]);
+    if (!existing.rows.length) return res.status(404).json({ error: 'Change order not found' });
+    if (existing.rows[0].status === 'approved') {
+      return res.status(409).json({ error: 'This change order is approved. Un-approve it before changing the lines.' });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('DELETE FROM co_line_items WHERE change_order_id = $1', [id]);
+      let order = 0;
+      let totalCents = 0;
+      for (const row of rows) {
+        const description = trim(row.description);
+        if (!description) continue;
+        const amount = Number(row.amount || 0);
+        totalCents += Math.round(amount * 100);
+        await client.query(
+          `INSERT INTO co_line_items (change_order_id, budget_code, description, amount, sort_order)
+           VALUES ($1,$2,$3,$4,$5)`,
+          [id, trim(row.budgetCode) || null, description, amount, order++]
+        );
+      }
+      await client.query('UPDATE change_orders SET amount = $1 WHERE id = $2', [totalCents / 100, id]);
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+    res.json(await changeOrderContext(id));
+  });
+
+  // ---------- Attachments ----------
+
+  app.post('/api/change-orders/:id/attachments', adminOnly, upload.array('files', 10), async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    const files = req.files || [];
+    if (!files.length) return res.status(400).json({ error: 'No files received' });
+
+    const start = await pool.query(
+      'SELECT COALESCE(MAX(sort_order), 0) + 1 AS n FROM co_attachments WHERE change_order_id = $1', [id]
+    );
+    let order = start.rows[0].n;
+    for (const file of files) {
+      await pool.query(
+        `INSERT INTO co_attachments (change_order_id, filename, content_type, bytes, size_bytes, uploaded_by, sort_order)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        [
+          id, file.originalname, file.mimetype, file.buffer, file.size,
+          req.user ? (req.user.name || req.user.email) : null, order++,
+        ]
+      );
+    }
+    res.json(await changeOrderContext(id));
+  });
+
+  app.get('/api/attachments/:id', adminOnly, async (req, res) => {
+    const row = await pool.query(
+      'SELECT filename, content_type, bytes FROM co_attachments WHERE id = $1', [parseInt(req.params.id, 10)]
+    );
+    if (!row.rows.length) return res.status(404).json({ error: 'Attachment not found' });
+    const file = row.rows[0];
+    res.setHeader('Content-Type', file.content_type || 'application/octet-stream');
+    res.setHeader('Content-Disposition', `inline; filename="${file.filename.replace(/"/g, '')}"`);
+    res.send(file.bytes);
+  });
+
+  app.delete('/api/attachments/:id', adminOnly, async (req, res) => {
+    const row = await pool.query(
+      'DELETE FROM co_attachments WHERE id = $1 RETURNING change_order_id', [parseInt(req.params.id, 10)]
+    );
+    if (!row.rows.length) return res.status(404).json({ error: 'Attachment not found' });
+    res.json(await changeOrderContext(row.rows[0].change_order_id));
+  });
+
+  // ---------- The change order document ----------
+
+  app.get('/api/change-orders/:id/pdf', adminOnly, async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    const context = await changeOrderContext(id);
+    if (!context) return res.status(404).json({ error: 'Change order not found' });
+
+    const pdf = await buildChangeOrderPdf(context);
+    const number = String(context.changeOrder.number || id).replace(/[^0-9]/g, '').padStart(2, '0');
+    const name = `CO ${number} - ${context.changeOrder.title}`.replace(/[^A-Za-z0-9 \-_.]/g, '').slice(0, 80);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${name}.pdf"`);
+    res.send(pdf);
   });
 
   // ---------- Pay applications ----------

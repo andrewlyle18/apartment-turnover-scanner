@@ -120,10 +120,113 @@ CREATE TABLE IF NOT EXISTS pay_app_lines (
 );
 
 CREATE INDEX IF NOT EXISTS idx_pay_app_lines_app ON pay_app_lines(pay_app_id);
+
+-- A change order's own lines, as they print on the change order document.
+-- The change order's amount is their total, never typed separately.
+CREATE TABLE IF NOT EXISTS co_line_items (
+  id SERIAL PRIMARY KEY,
+  change_order_id INTEGER NOT NULL REFERENCES change_orders(id) ON DELETE CASCADE,
+  budget_code TEXT,
+  description TEXT NOT NULL,
+  amount NUMERIC(14,2) NOT NULL DEFAULT 0,
+  sort_order INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_co_line_items_co ON co_line_items(change_order_id);
+
+-- Backup for the change order: the sub's quote, a marked-up drawing, a photo.
+-- Held in the database rather than on disk, because Render's disk is wiped on
+-- every deploy and a change order without its backup is worth very little.
+CREATE TABLE IF NOT EXISTS co_attachments (
+  id SERIAL PRIMARY KEY,
+  change_order_id INTEGER NOT NULL REFERENCES change_orders(id) ON DELETE CASCADE,
+  filename TEXT NOT NULL,
+  content_type TEXT,
+  bytes BYTEA NOT NULL,
+  size_bytes INTEGER NOT NULL,
+  uploaded_by TEXT,
+  uploaded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  sort_order INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_co_attachments_co ON co_attachments(change_order_id);
+`;
+
+// Fields the change order document prints that the first cut didn't hold.
+const CO_EXTRA_COLUMNS = `
+  ALTER TABLE change_orders ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE change_orders ADD COLUMN IF NOT EXISTS accounting_method TEXT DEFAULT 'Amount Based';
+  ALTER TABLE change_orders ADD COLUMN IF NOT EXISTS schedule_impact_days INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE change_orders ADD COLUMN IF NOT EXISTS due_date DATE;
+  ALTER TABLE change_orders ADD COLUMN IF NOT EXISTS requested_from TEXT;
+  ALTER TABLE change_orders ADD COLUMN IF NOT EXISTS reviewed_by TEXT;
+  ALTER TABLE change_orders ADD COLUMN IF NOT EXISTS final_reviewer TEXT;
+  ALTER TABLE projects ADD COLUMN IF NOT EXISTS address1 TEXT;
+  ALTER TABLE projects ADD COLUMN IF NOT EXISTS address2 TEXT;
 `;
 
 async function initBilling() {
   await pool.query(SCHEMA);
+  await pool.query(CO_EXTRA_COLUMNS);
+}
+
+/**
+ * What the change order document says about the contract sums. Every one of
+ * these is a sum of what is already recorded — the line on the Procore
+ * document that read "Net change by previously authorized Change Orders:
+ * $0.00" while showing a prior sum that included them cannot happen here.
+ */
+async function changeOrderContext(changeOrderId) {
+  const row = await pool.query(
+    `SELECT co.*, c.sub_company, c.sub_address1, c.sub_address2, c.number AS commitment_number,
+            c.title AS commitment_title, c.contractor_name, c.contractor_address1,
+            c.contractor_address2, c.project_id, p.name AS project_name,
+            p.address1 AS project_address1, p.address2 AS project_address2
+     FROM change_orders co
+     JOIN commitments c ON c.id = co.commitment_id
+     JOIN projects p ON p.id = c.project_id
+     WHERE co.id = $1`,
+    [changeOrderId]
+  );
+  if (!row.rows.length) return null;
+  const co = row.rows[0];
+
+  const base = await pool.query(
+    `SELECT COALESCE(SUM(scheduled_value), 0) AS total FROM sov_lines
+     WHERE commitment_id = $1 AND source = 'base'`,
+    [co.commitment_id]
+  );
+  // "Previously authorized" means approved AND raised before this one.
+  const previous = await pool.query(
+    `SELECT COALESCE(SUM(amount), 0) AS total FROM change_orders
+     WHERE commitment_id = $1 AND status = 'approved' AND id < $2`,
+    [co.commitment_id, changeOrderId]
+  );
+  const lines = await pool.query(
+    'SELECT * FROM co_line_items WHERE change_order_id = $1 ORDER BY sort_order, id', [changeOrderId]
+  );
+  const attachments = await pool.query(
+    `SELECT id, filename, content_type, size_bytes, uploaded_at, sort_order
+     FROM co_attachments WHERE change_order_id = $1 ORDER BY sort_order, id`,
+    [changeOrderId]
+  );
+
+  const originalCents = toCents(base.rows[0].total);
+  const previousCents = toCents(previous.rows[0].total);
+  const amountCents = toCents(co.amount);
+
+  return {
+    changeOrder: co,
+    lines: lines.rows,
+    attachments: attachments.rows,
+    sums: {
+      originalContractSum: toDollars(originalCents),
+      netChangeByPrevious: toDollars(previousCents),
+      contractSumPrior: toDollars(originalCents + previousCents),
+      thisChangeOrder: toDollars(amountCents),
+      newContractSum: toDollars(originalCents + previousCents + amountCents),
+    },
+  };
 }
 
 // ---------- Money ----------
@@ -295,6 +398,7 @@ const newToken = () => crypto.randomBytes(24).toString('hex');
 
 module.exports = {
   initBilling,
+  changeOrderContext,
   computePayApp,
   applicationView,
   loadApplication,
