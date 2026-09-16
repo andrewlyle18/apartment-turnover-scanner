@@ -181,6 +181,54 @@ function mountBillingRoutes(app, { adminOnly, upload }) {
 
   // ---------- Change orders ----------
 
+  // A change order bills against the same budget code as the contract it
+  // changes, so take it from the schedule of values rather than asking again.
+  async function commitmentBudgetCode(commitmentId) {
+    const row = await pool.query(
+      `SELECT item_no, COUNT(*)::int AS n
+       FROM sov_lines
+       WHERE commitment_id = $1 AND source = 'base' AND item_no IS NOT NULL AND item_no <> ''
+       GROUP BY item_no ORDER BY n DESC LIMIT 1`,
+      [commitmentId]
+    );
+    return row.rows.length ? row.rows[0].item_no : null;
+  }
+
+  // Keeps the single line item in step with the change order's own amount and
+  // title. Only while there is one line (or none) — once someone has broken
+  // the change order into several lines, those lines are the truth and the
+  // amount follows them instead.
+  async function syncSingleLineItem(changeOrderId) {
+    const co = await pool.query(
+      'SELECT commitment_id, title, amount FROM change_orders WHERE id = $1', [changeOrderId]
+    );
+    if (!co.rows.length) return;
+    const existing = await pool.query(
+      'SELECT id, budget_code FROM co_line_items WHERE change_order_id = $1 ORDER BY sort_order, id', [changeOrderId]
+    );
+    if (existing.rows.length > 1) return;
+
+    const amount = Number(co.rows[0].amount || 0);
+    if (!existing.rows.length && !amount) return;
+
+    const code = existing.rows.length && existing.rows[0].budget_code
+      ? existing.rows[0].budget_code
+      : await commitmentBudgetCode(co.rows[0].commitment_id);
+
+    if (existing.rows.length) {
+      await pool.query(
+        'UPDATE co_line_items SET budget_code = $1, description = $2, amount = $3 WHERE id = $4',
+        [code, co.rows[0].title, amount, existing.rows[0].id]
+      );
+    } else {
+      await pool.query(
+        `INSERT INTO co_line_items (change_order_id, budget_code, description, amount, sort_order)
+         VALUES ($1,$2,$3,$4,0)`,
+        [changeOrderId, code, co.rows[0].title, amount]
+      );
+    }
+  }
+
   app.post('/api/commitments/:id/change-orders', adminOnly, async (req, res) => {
     const commitmentId = parseInt(req.params.id, 10);
     const b = req.body || {};
@@ -203,6 +251,10 @@ function mountBillingRoutes(app, { adminOnly, upload }) {
         req.user ? (req.user.name || req.user.email) : null,
       ]
     );
+    // The amount you just typed becomes the first line item, coded to the
+    // contract's own budget code — the usual case is one line, and retyping
+    // it is how the two figures end up disagreeing.
+    await syncSingleLineItem(result.rows[0].id);
     res.json({ changeOrder: result.rows[0] });
   });
 
@@ -250,6 +302,7 @@ function mountBillingRoutes(app, { adminOnly, upload }) {
 
       const after = await client.query('SELECT * FROM change_orders WHERE id = $1', [id]);
       const updated = after.rows[0];
+      const amountOrTitleChanged = b.amount !== undefined || b.title !== undefined;
 
       // An approved change order is a line in the schedule of values. That is
       // the whole point — it bills like everything else.
@@ -297,6 +350,7 @@ function mountBillingRoutes(app, { adminOnly, upload }) {
       }
 
       await client.query('COMMIT');
+      if (amountOrTitleChanged) await syncSingleLineItem(id);
       res.json({ changeOrder: updated });
     } catch (err) {
       await client.query('ROLLBACK');
