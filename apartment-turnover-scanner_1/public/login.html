@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <meta name="theme-color" content="#07354D" />
-<title>Sign in &middot; Serial Number Scanner</title>
+<title>Sign in &middot; Carter &amp; Carter Construction</title>
 <link rel="icon" type="image/png" href="/favicon.png?v=3" />
 <style>
   :root {
@@ -89,7 +89,7 @@
   <div class="card">
     <div class="card-head">
       <img src="/mark.png?v=3" alt="Carter &amp; Carter" />
-      <h1 id="title">Serial Number Scanner</h1>
+      <h1 id="title">Carter &amp; Carter Construction</h1>
       <p id="subtitle">Sign in to continue</p>
     </div>
     <form id="form">
@@ -98,8 +98,10 @@
         <input type="text" id="name" autocomplete="name" />
       </div>
 
-      <label for="email">EMAIL</label>
-      <input type="email" id="email" autocomplete="username" required />
+      <div id="emailRow">
+        <label for="email">EMAIL</label>
+        <input type="email" id="email" autocomplete="username" required />
+      </div>
 
       <label for="password" id="passwordLabel">PASSWORD</label>
       <input type="password" id="password" autocomplete="current-password" required />
@@ -126,7 +128,9 @@
     document.getElementById('passwordLabel').textContent = 'CHOOSE A PASSWORD';
     document.getElementById('nameRow').style.display = 'block';
     passwordInput.setAttribute('autocomplete', 'new-password');
-    emailInput.parentElement.style.display = 'none';
+    // The invite already says who this is, so the email field isn't needed —
+    // hide the ROW, not the input's parent, which is the whole form.
+    document.getElementById('emailRow').style.display = 'none';
     emailInput.required = false;
     submit.textContent = 'Set password and sign in';
     document.getElementById('hint').textContent =
@@ -164,7 +168,7 @@
 
       // The website uses the cookie; the token is here for anything else.
       try { localStorage.setItem('scanner-token', data.token); } catch (e) {}
-      show('Signed in. Taking you to the scanner…', 'ok');
+      show('Signed in. Taking you in…', 'ok');
       location.href = '/';
     } catch (err) {
       show('Could not reach the server. Check your connection and try again.', 'error');
