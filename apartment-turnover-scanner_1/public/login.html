@@ -83,6 +83,9 @@
   .message.error { display: block; background: #fdecec; color: #a11b1b; }
   .message.ok { display: block; background: #e8f6ed; color: #15683a; }
   .hint { font-size: 13px; color: #6b7783; margin-top: 14px; line-height: 1.5; }
+  .hint a { color: var(--brand); font-weight: 600; text-decoration: none; }
+  #code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+          font-size: 20px; letter-spacing: 2px; text-align: center; text-transform: uppercase; }
 </style>
 </head>
 <body>
@@ -103,10 +106,17 @@
         <input type="email" id="email" autocomplete="username" required />
       </div>
 
+      <div id="codeRow" style="display:none">
+        <label for="code">INVITE CODE</label>
+        <input type="text" id="code" autocapitalize="characters" autocorrect="off"
+               spellcheck="false" placeholder="ABCD-2345" />
+      </div>
+
       <label for="password" id="passwordLabel">PASSWORD</label>
       <input type="password" id="password" autocomplete="current-password" required />
 
       <button type="submit" id="submit">Sign in</button>
+      <p class="hint"><a href="#" id="toggleMode">I have an invite code</a></p>
       <div class="message" id="message"></div>
       <p class="hint" id="hint"></p>
     </form>
@@ -123,19 +133,38 @@
   const emailInput = document.getElementById('email');
   const passwordInput = document.getElementById('password');
 
-  if (invite) {
-    document.getElementById('subtitle').textContent = 'Set your password to finish setting up';
-    document.getElementById('passwordLabel').textContent = 'CHOOSE A PASSWORD';
-    document.getElementById('nameRow').style.display = 'block';
-    passwordInput.setAttribute('autocomplete', 'new-password');
-    // The invite already says who this is, so the email field isn't needed —
-    // hide the ROW, not the input's parent, which is the whole form.
-    document.getElementById('emailRow').style.display = 'none';
-    emailInput.required = false;
-    submit.textContent = 'Set password and sign in';
-    document.getElementById('hint').textContent =
-      'At least 10 characters, with a letter and a number. Nobody else ever sees it.';
+  // 'signin' | 'link' (invite in the URL) | 'code' (typed with their email)
+  let mode = invite ? 'link' : 'signin';
+
+  function render() {
+    const claiming = mode !== 'signin';
+    document.getElementById('subtitle').textContent =
+      claiming ? 'Set your password to finish setting up' : 'Sign in to continue';
+    document.getElementById('passwordLabel').textContent =
+      claiming ? 'CHOOSE A PASSWORD' : 'PASSWORD';
+    document.getElementById('nameRow').style.display = claiming ? 'block' : 'none';
+    // The link already identifies the person; a typed code still needs the email.
+    document.getElementById('emailRow').style.display = mode === 'link' ? 'none' : 'block';
+    document.getElementById('codeRow').style.display = mode === 'code' ? 'block' : 'none';
+    emailInput.required = mode !== 'link';
+    passwordInput.setAttribute('autocomplete', claiming ? 'new-password' : 'current-password');
+    submit.textContent = claiming ? 'Set password and sign in' : 'Sign in';
+    document.getElementById('hint').textContent = claiming
+      ? 'At least 10 characters, with a letter and a number. Nobody else ever sees it.'
+      : '';
+    toggle.textContent = mode === 'code' ? 'Back to signing in' : 'I have an invite code';
+    toggle.style.display = mode === 'link' ? 'none' : 'inline';
   }
+
+  const toggle = document.getElementById('toggleMode');
+  toggle.addEventListener('click', function (event) {
+    event.preventDefault();
+    mode = mode === 'code' ? 'signin' : 'code';
+    message.className = 'message';
+    render();
+  });
+
+  render();
 
   function show(text, kind) {
     message.textContent = text;
@@ -148,10 +177,20 @@
     message.className = 'message';
 
     try {
-      const url = invite ? '/api/auth/accept' : '/api/auth/login';
-      const body = invite
-        ? { invite: invite, password: passwordInput.value, name: document.getElementById('name').value }
-        : { email: emailInput.value, password: passwordInput.value };
+      const url = mode === 'signin' ? '/api/auth/login' : '/api/auth/accept';
+      let body;
+      if (mode === 'link') {
+        body = { invite: invite, password: passwordInput.value, name: document.getElementById('name').value };
+      } else if (mode === 'code') {
+        body = {
+          email: emailInput.value,
+          code: document.getElementById('code').value,
+          password: passwordInput.value,
+          name: document.getElementById('name').value,
+        };
+      } else {
+        body = { email: emailInput.value, password: passwordInput.value };
+      }
 
       const response = await fetch(url, {
         method: 'POST',

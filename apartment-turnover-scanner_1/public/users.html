@@ -43,6 +43,17 @@
   .message.ok { display:block; background:#e8f6ed; color:#15683a; }
   .message code { display:block; margin-top:8px; word-break:break-all; font-size:12px; }
   .note { color:#6b7783; font-size:13px; line-height:1.55; }
+  .bigcode {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 30px; font-weight: 700; letter-spacing: 3px;
+    color: #07354D; background: #fff; border: 2px dashed #b9c6d1;
+    border-radius: 10px; padding: 14px; text-align: center; margin: 12px 0 0;
+    user-select: all;
+  }
+  .rowcode {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 13px; font-weight: 700; letter-spacing: 1px; color: #8a5a12;
+  }
 </style>
 </head>
 <body>
@@ -75,7 +86,7 @@
             </select>
           </div>
         </div>
-        <button class="primary" type="submit" id="inviteButton" style="margin-top:16px;width:auto;padding:12px 20px">Send invite</button>
+        <button class="primary" type="submit" id="inviteButton" style="margin-top:16px;width:auto;padding:12px 20px">Create invite code</button>
         <div class="message" id="inviteMessage"></div>
         <p class="note" style="margin-bottom:0">
           Administrators can invite and remove people. Everyone else can scan and see the projects.
@@ -137,8 +148,14 @@
     if (user.pending) {
       const tag = document.createElement('span');
       tag.className = 'tag pending';
-      tag.textContent = 'INVITE SENT';
+      tag.textContent = 'NOT SET UP YET';
       row.appendChild(tag);
+      if (user.invite_code) {
+        const code = document.createElement('span');
+        code.className = 'rowcode';
+        code.textContent = user.invite_code;
+        row.appendChild(code);
+      }
     }
     if (user.disabled_at) {
       const tag = document.createElement('span');
@@ -204,17 +221,27 @@
           role: document.getElementById('role').value,
         }),
       });
-      if (result.emailed) {
-        show(inviteMessage, 'Invite emailed. It expires in 14 days.', 'ok');
-      } else {
-        inviteMessage.className = 'message ok';
-        inviteMessage.textContent = 'Account created, but the email didn’t send'
-          + (result.emailError ? ' (' + result.emailError + ')' : '')
-          + '. Send them this link yourself:';
-        const code = document.createElement('code');
-        code.textContent = result.link;
-        inviteMessage.appendChild(code);
-      }
+      inviteMessage.className = 'message ok';
+      inviteMessage.innerHTML = '';
+
+      const heading = document.createElement('div');
+      heading.textContent = 'Invite created. Give them this code — it expires in 14 days.';
+      inviteMessage.appendChild(heading);
+
+      const big = document.createElement('div');
+      big.className = 'bigcode';
+      big.textContent = result.code;
+      inviteMessage.appendChild(big);
+
+      const how = document.createElement('div');
+      how.className = 'note';
+      how.style.marginTop = '10px';
+      how.textContent = 'They open the sign-in page, tap "I have an invite code", and enter their email with this code. Or send them this link instead:';
+      inviteMessage.appendChild(how);
+
+      const linkEl = document.createElement('code');
+      linkEl.textContent = result.link;
+      inviteMessage.appendChild(linkEl);
       document.getElementById('email').value = '';
       document.getElementById('name').value = '';
       load();
