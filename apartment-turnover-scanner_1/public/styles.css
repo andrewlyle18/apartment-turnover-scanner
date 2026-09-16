@@ -494,3 +494,57 @@ input[type="text"], input[type="file"] {
 .tool-go { font-size: 24px; color: #9aa6b2; }
 
 .tool-progress { font-size: 12px; font-weight: 600; color: var(--brand, #07354D); margin-top: 4px; }
+
+/* ---- Commitments & billing ---- */
+table.grid { width: 100%; border-collapse: collapse; font-size: 14px; }
+table.grid th {
+  text-align: left; font-size: 11px; letter-spacing: .4px; color: #6b7783;
+  border-bottom: 1px solid #e3e8ee; padding: 8px 10px; white-space: nowrap;
+}
+table.grid td { padding: 9px 10px; border-bottom: 1px solid #f0f3f6; vertical-align: top; }
+table.grid tbody tr:last-child td { border-bottom: none; }
+table.grid td.num, table.grid th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+table.grid tr.clickable { cursor: pointer; }
+table.grid tr.clickable:hover { background: #f7f9fb; }
+table.grid tfoot td { padding: 10px; border-top: 2px solid #e3e8ee; }
+table.grid .sub { font-size: 12px; color: #6b7783; margin-top: 2px; }
+table.grid tr.block-head td {
+  background: #f4f6f8; font-weight: 700; font-size: 12px; letter-spacing: .4px;
+  text-transform: uppercase; color: #48555f;
+}
+table.grid tr.block-total td { border-top: 1px solid #d9e0e7; background: #fcfdfe; }
+.scroll-x { overflow-x: auto; }
+table.payapp { min-width: 900px; }
+input.cell {
+  width: 104px; padding: 5px 7px; font-size: 14px; text-align: right;
+  border: 1px solid #d3dae1; border-radius: 6px; font-variant-numeric: tabular-nums;
+}
+input.cell:focus { outline: 2px solid var(--brand); outline-offset: -1px; }
+.field-grid { display: flex; flex-wrap: wrap; gap: 12px; }
+.field-grid label, .card > label {
+  display: flex; flex-direction: column; flex: 1; min-width: 190px;
+  font-size: 11px; font-weight: 700; letter-spacing: .5px; color: #6b7783; gap: 4px;
+}
+.field-grid input, .card > label input, .card > label textarea, .card textarea {
+  width: 100%; padding: 10px; font-size: 15px; border: 1px solid #d3dae1;
+  border-radius: 8px; font-family: inherit; font-weight: 400; color: #0b1f2a;
+}
+.card textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+.pill {
+  display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: .5px;
+  padding: 3px 7px; border-radius: 999px; background: #eef1f4; color: #48555f;
+}
+.pill.approved { background: #e8f6ed; color: #15683a; }
+.pill.pending, .pill.open { background: #fdf3e2; color: #8a5a12; }
+.pill.submitted { background: #e7effa; color: #1c4f86; }
+.pill.rejected { background: #fdecec; color: #a11b1b; }
+.pill.edited { background: #f3e8fd; color: #6b2fa1; }
+button.small { padding: 5px 9px; font-size: 12px; }
+.link-card code.link {
+  display: block; margin-top: 10px; padding: 10px 12px; background: #f4f6f8;
+  border-radius: 8px; font-size: 12px; word-break: break-all; color: #07354D;
+}
+table.summary { width: 100%; max-width: 560px; border-collapse: collapse; font-size: 14px; }
+table.summary td { padding: 7px 4px; border-bottom: 1px solid #f0f3f6; }
+table.summary td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+table.summary tr.due td { font-weight: 700; font-size: 16px; border-top: 2px solid #d9e0e7; border-bottom: none; }
