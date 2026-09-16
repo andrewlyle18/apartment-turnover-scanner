@@ -127,6 +127,34 @@ function mountBillingRoutes(app, { adminOnly, upload }) {
     res.json({ commitment: result.rows[0] });
   });
 
+  // Deleting a commitment takes its schedule of values, change orders and
+  // applications with it. Refused once an application has been approved:
+  // that is a payment certified, and it stays on the record.
+  app.delete('/api/commitments/:id', adminOnly, async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    const existing = await pool.query('SELECT sub_company FROM commitments WHERE id = $1', [id]);
+    if (!existing.rows.length) return res.status(404).json({ error: 'Commitment not found' });
+
+    // The name has to be typed out, so this can't happen by accident.
+    const confirmName = trim(req.body && req.body.confirmName);
+    if (confirmName.toLowerCase() !== trim(existing.rows[0].sub_company).toLowerCase()) {
+      return res.status(400).json({ error: "That name doesn't match the subcontractor on this commitment." });
+    }
+
+    const approved = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM pay_apps WHERE commitment_id = $1 AND status = 'approved'`, [id]
+    );
+    if (approved.rows[0].n > 0) {
+      return res.status(409).json({
+        error: `This commitment has ${approved.rows[0].n} approved pay application${approved.rows[0].n === 1 ? '' : 's'} and can't be deleted. Archive it instead — it disappears from the list and keeps the record.`,
+        canArchive: true,
+      });
+    }
+
+    await pool.query('DELETE FROM commitments WHERE id = $1', [id]);
+    res.json({ ok: true, deleted: existing.rows[0].sub_company });
+  });
+
   // ---------- Schedule of values ----------
   // Replaces the base schedule wholesale. Change-order lines are left alone,
   // and a line that is already billed on an open or approved application
@@ -406,6 +434,32 @@ function mountBillingRoutes(app, { adminOnly, upload }) {
       client.release();
     }
     res.json(await changeOrderContext(id));
+  });
+
+  // Deleting a change order. Allowed while nothing has been billed against
+  // it — after that the money has moved and the record has to stand.
+  app.delete('/api/change-orders/:id', adminOnly, async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    const existing = await pool.query('SELECT number, title FROM change_orders WHERE id = $1', [id]);
+    if (!existing.rows.length) return res.status(404).json({ error: 'Change order not found' });
+
+    const billed = await pool.query(
+      `SELECT COALESCE(SUM(l.previous_completed + l.this_period + l.materials_stored), 0) AS billed
+       FROM pay_app_lines l
+       JOIN sov_lines s ON s.id = l.sov_line_id
+       WHERE s.change_order_id = $1`,
+      [id]
+    );
+    if (toCents(billed.rows[0].billed) > 0) {
+      return res.status(409).json({
+        error: 'This change order has been billed. Reverse the billing on the affected application first, or leave it in place.',
+      });
+    }
+
+    // Its schedule-of-values line and any zero lines on open applications go
+    // with it, by the foreign keys.
+    await pool.query('DELETE FROM change_orders WHERE id = $1', [id]);
+    res.json({ ok: true, deleted: existing.rows[0] });
   });
 
   // ---------- Attachments ----------
