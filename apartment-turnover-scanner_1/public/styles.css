@@ -492,3 +492,5 @@ input[type="text"], input[type="file"] {
 .tool-name { font-weight: 700; font-size: 16px; }
 .tool-blurb { font-size: 13px; color: #6b7783; margin-top: 2px; }
 .tool-go { font-size: 24px; color: #9aa6b2; }
+
+.tool-progress { font-size: 12px; font-weight: 600; color: var(--brand, #07354D); margin-top: 4px; }

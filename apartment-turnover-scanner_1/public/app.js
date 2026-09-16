@@ -537,8 +537,10 @@
       return;
     }
 
+    // Progress belongs to the tool it describes — up by the project title it
+    // would be anyone's guess which tool the numbers were about.
     const progress = summary
-      ? `${summary.completeUnits}/${summary.totalUnits} units complete &middot; ${summary.doneItems}/${summary.totalItems} items scanned`
+      ? `${summary.completeUnits} of ${summary.totalUnits} units complete`
       : '';
 
     root.innerHTML = `
@@ -546,7 +548,6 @@
         <h1 style="margin:0;">${escapeHtml(project.name)}</h1>
         <button class="secondary" id="backBtn">&larr; All projects</button>
       </div>
-      ${progress ? `<p class="help" style="margin:6px 0 0;">${progress}</p>` : ''}
       <div class="card">
         <h2 style="margin-top:0;">Tools</h2>
         <div class="tool-list">
@@ -556,6 +557,7 @@
               <span class="tool-text">
                 <span class="tool-name">${escapeHtml(tool.name)}</span>
                 <span class="tool-blurb">${escapeHtml(tool.blurb)}</span>
+                ${tool.id === 'scanner' && progress ? `<span class="tool-progress">${progress}</span>` : ''}
               </span>
               <span class="tool-go">&rsaquo;</span>
             </button>
