@@ -552,3 +552,5 @@ table.summary { width: 100%; max-width: 560px; border-collapse: collapse; font-s
 table.summary td { padding: 7px 4px; border-bottom: 1px solid #f0f3f6; }
 table.summary td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 table.summary tr.due td { font-weight: 700; font-size: 16px; border-top: 2px solid #d9e0e7; border-bottom: none; }
+.preview { margin-top: 14px; padding: 14px; background: #f7f9fb; border: 1px solid #e3e8ee; border-radius: 10px; }
+input[type="file"] { font-size: 14px; margin-top: 8px; }

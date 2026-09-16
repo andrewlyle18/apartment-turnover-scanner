@@ -2240,7 +2240,10 @@
           <p class="help" style="margin-top:10px;">${base.length} lines. Once billing has started this can only be changed by change order.</p>
           <button class="secondary" id="replaceSov" style="margin-top:8px;">Replace schedule</button>
         ` : `
-          <p class="help">Paste the schedule of values from Excel &mdash; three columns: item number, description, scheduled value. Copy the cells and paste straight in.</p>
+          <p class="help">Upload the subcontract's G703 or schedule of values &mdash; any spreadsheet with a description column and a value column. It finds the columns itself; there's no template to match.</p>
+          <input type="file" id="sovFile" accept=".xlsx,.xls,.csv" />
+          <div id="sovPreview"></div>
+          <p class="help" style="margin-top:16px;">Or paste the rows straight from Excel &mdash; item number, description, value.</p>
           <textarea id="sovPaste" rows="8" placeholder="09-990 (S)&#9;BLD 5 - Floor 1 Rough&#9;3221.19"></textarea>
           <div class="row" style="margin-top:10px;">
             <button class="primary" id="saveSov">Save schedule</button>
@@ -2288,6 +2291,65 @@
     `;
 
     document.getElementById('backBtn').addEventListener('click', () => navigate(`/project/${projectId}/commitments`));
+
+    const sovFile = document.getElementById('sovFile');
+    if (sovFile) {
+      sovFile.addEventListener('change', async () => {
+        const file = sovFile.files[0];
+        if (!file) return;
+        const preview = document.getElementById('sovPreview');
+        preview.innerHTML = '<p class="help">Reading the file...</p>';
+        const form = new FormData();
+        form.append('file', file);
+        let found;
+        try {
+          const token = (function () { try { return localStorage.getItem('scanner-token'); } catch (e) { return null; } })();
+          const response = await fetch(`/api/commitments/${commitmentId}/sov/preview`, {
+            method: 'POST',
+            headers: token ? { Authorization: `Bearer ${token}` } : {},
+            credentials: 'same-origin',
+            body: form,
+          });
+          found = await response.json();
+          if (!response.ok) throw new Error(found.error || 'Could not read that file');
+        } catch (e) {
+          preview.innerHTML = `<p class="help">${escapeHtml(e.message)}</p>`;
+          return;
+        }
+
+        const changeOrders = (found.skipped || []).filter((s) => s.reason === 'change order');
+        preview.innerHTML = `
+          <div class="preview">
+            <div class="row between">
+              <strong>${found.lines.length} lines &middot; ${money(found.total)}</strong>
+              <span class="help">from sheet "${escapeHtml(found.sheetName)}"</span>
+            </div>
+            ${changeOrders.length ? `<p class="help" style="margin:8px 0 0;">
+              ${changeOrders.length} change-order line${changeOrders.length === 1 ? '' : 's'} left out of the base schedule
+              (${changeOrders.map((c) => escapeHtml(c.description)).join(', ')}).
+              Add ${changeOrders.length === 1 ? 'it' : 'them'} as change orders below so ${changeOrders.length === 1 ? 'it carries its' : 'they carry their'} own approval.
+            </p>` : ''}
+            <table class="grid" style="margin-top:10px;">
+              <thead><tr><th>Item no.</th><th>Description</th><th class="num">Scheduled value</th></tr></thead>
+              <tbody>
+                ${found.lines.slice(0, 6).map((l) => `<tr><td>${escapeHtml(l.itemNo)}</td><td>${escapeHtml(l.description)}</td><td class="num">${money(l.scheduledValue)}</td></tr>`).join('')}
+                ${found.lines.length > 6 ? `<tr><td></td><td class="help">&hellip; and ${found.lines.length - 6} more</td><td class="num help">${escapeHtml(found.lines[found.lines.length - 1].description)}: ${money(found.lines[found.lines.length - 1].scheduledValue)}</td></tr>` : ''}
+              </tbody>
+            </table>
+            <div class="row" style="margin-top:12px;">
+              <button class="primary" id="saveImported">Save these ${found.lines.length} lines</button>
+            </div>
+          </div>`;
+
+        document.getElementById('saveImported').addEventListener('click', async () => {
+          try {
+            await api(`/api/commitments/${commitmentId}/sov`, { method: 'PUT', body: JSON.stringify({ lines: found.lines }) });
+            toast(`Saved ${found.lines.length} lines`);
+            renderCommitment(projectId, commitmentId);
+          } catch (e) { toast(`Could not save: ${e.message}`); }
+        });
+      });
+    }
 
     const sovPaste = document.getElementById('sovPaste');
     if (sovPaste) {
