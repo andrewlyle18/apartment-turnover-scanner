@@ -196,6 +196,10 @@
       main.querySelectorAll('input.entry').forEach((input) => {
         input.addEventListener('input', onEntry);
         input.addEventListener('focus', () => input.select());
+        // The server caps a line at its scheduled value. Show that the moment
+        // they leave the box, rather than letting the screen keep a figure
+        // the application doesn't actually hold.
+        input.addEventListener('blur', () => syncRow(input.closest('tr')));
       });
       document.getElementById('submitBtn').addEventListener('click', submit);
     } else {
@@ -257,6 +261,19 @@
     note('Saving…');
     clearTimeout(saveTimer);
     saveTimer = setTimeout(save, 700);
+  }
+
+  function syncRow(row) {
+    if (!row) return;
+    const line = data.lines.find((l) => l.id === Number(row.dataset.line));
+    if (!line) return;
+    const set = (field, value) => {
+      const input = row.querySelector(`[data-field="${field}"]`);
+      if (input && document.activeElement !== input) input.value = value;
+    };
+    set('thisPeriod', line.thisPeriod);
+    set('materialsStored', line.materialsStored);
+    set('percent', (line.percent * 100).toFixed(1));
   }
 
   function note(text) {
