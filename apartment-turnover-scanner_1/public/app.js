@@ -175,10 +175,17 @@
       return;
     }
 
-    const commitmentMatch = hash.match(/^\/project\/(\d+)\/commitment\/(\d+)$/);
+    const commitmentMatch = hash.match(/^\/project\/(\d+)\/commitment\/(\d+)(?:\/(sov|changes|invoicing))?$/);
     if (commitmentMatch) {
       if (!canManage) { navigate(`/project/${commitmentMatch[1]}`); return; }
-      renderCommitment(parseInt(commitmentMatch[1], 10), parseInt(commitmentMatch[2], 10));
+      renderCommitment(parseInt(commitmentMatch[1], 10), parseInt(commitmentMatch[2], 10), commitmentMatch[3] || 'sov');
+      return;
+    }
+
+    const changeOrderMatch = hash.match(/^\/project\/(\d+)\/commitment\/(\d+)\/co\/(\d+)$/);
+    if (changeOrderMatch) {
+      if (!canManage) { navigate(`/project/${changeOrderMatch[1]}`); return; }
+      renderChangeOrder(parseInt(changeOrderMatch[1], 10), parseInt(changeOrderMatch[2], 10), parseInt(changeOrderMatch[3], 10));
       return;
     }
 
@@ -2170,7 +2177,7 @@
     });
   }
 
-  async function renderCommitment(projectId, commitmentId) {
+  async function renderCommitment(projectId, commitmentId, tab = 'sov') {
     root.innerHTML = `<div class="card"><p class="help">Loading...</p></div>`;
     let data;
     try {
@@ -2191,7 +2198,7 @@
       <td class="num">${money(l.scheduled_value)}</td></tr>`).join('');
 
     const coRows = data.changeOrders.map((co) => `
-      <tr>
+      <tr class="clickable" data-co="${co.id}">
         <td>${escapeHtml(co.number)}</td>
         <td>${escapeHtml(co.title)}<div class="sub">${escapeHtml(co.description || '')}</div></td>
         <td class="num">${money(co.amount)}</td>
@@ -2200,6 +2207,7 @@
           ${co.status === 'approved'
             ? `<button class="secondary small" data-unapprove="${co.id}">Un-approve</button>`
             : `<button class="go-btn small" data-approve="${co.id}">Approve</button>`}
+          <button class="secondary small" data-open-co="${co.id}">Open</button>
         </td>
       </tr>`).join('');
 
@@ -2223,12 +2231,19 @@
         <button class="secondary" id="backBtn">&larr; Commitments</button>
       </div>
 
+      <div class="tabs">
+        <button class="tab ${tab === 'sov' ? 'on' : ''}" data-tab="sov">Schedule of values</button>
+        <button class="tab ${tab === 'changes' ? 'on' : ''}" data-tab="changes">Change orders${data.changeOrders.length ? ` (${data.changeOrders.length})` : ''}</button>
+        <button class="tab ${tab === 'invoicing' ? 'on' : ''}" data-tab="invoicing">Invoicing${data.payApps.length ? ` (${data.payApps.length})` : ''}</button>
+      </div>
+
       <div class="stats">
         <div class="stat"><div class="num">${money(baseTotal)}</div><div class="label">Original contract</div></div>
         <div class="stat"><div class="num">${money(coTotal)}</div><div class="label">Approved changes</div></div>
         <div class="stat"><div class="num">${money(baseTotal + coTotal)}</div><div class="label">Contract to date</div></div>
       </div>
 
+      ${tab !== 'sov' ? '' : `
       <div class="card">
         <h2 style="margin-top:0;">Schedule of values</h2>
         ${base.length ? `
@@ -2252,6 +2267,9 @@
         `}
       </div>
 
+      `}
+
+      ${tab !== 'changes' ? '' : `
       <div class="card">
         <h2 style="margin-top:0;">Change orders</h2>
         ${data.changeOrders.length ? `
@@ -2271,6 +2289,9 @@
         <div class="row" style="margin-top:10px;"><button class="primary" id="addCo">Add change order</button></div>
       </div>
 
+      `}
+
+      ${tab !== 'invoicing' ? '' : `
       <div class="card">
         <h2 style="margin-top:0;">Pay applications</h2>
         ${data.payApps.length ? `
@@ -2288,7 +2309,17 @@
           <p class="help" style="margin-top:8px;">Opening a period creates the link you send the sub. Previous completed carries forward from the last approved application.</p>
         ` : '<p class="help">Add the schedule of values before opening a billing period.</p>'}
       </div>
+      `}
     `;
+
+    root.querySelectorAll('.tab').forEach((button) => {
+      button.addEventListener('click', () => {
+        const route = button.dataset.tab === 'sov'
+          ? `/project/${projectId}/commitment/${commitmentId}`
+          : `/project/${projectId}/commitment/${commitmentId}/${button.dataset.tab}`;
+        navigate(route);
+      });
+    });
 
     document.getElementById('backBtn').addEventListener('click', () => navigate(`/project/${projectId}/commitments`));
 
@@ -2345,7 +2376,7 @@
           try {
             await api(`/api/commitments/${commitmentId}/sov`, { method: 'PUT', body: JSON.stringify({ lines: found.lines }) });
             toast(`Saved ${found.lines.length} lines`);
-            renderCommitment(projectId, commitmentId);
+            renderCommitment(projectId, commitmentId, tab);
           } catch (e) { toast(`Could not save: ${e.message}`); }
         });
       });
@@ -2377,7 +2408,7 @@
         try {
           await api(`/api/commitments/${commitmentId}/sov`, { method: 'PUT', body: JSON.stringify({ lines }) });
           toast(`Saved ${lines.length} lines`);
-          renderCommitment(projectId, commitmentId);
+          renderCommitment(projectId, commitmentId, tab);
         } catch (e) { toast(`Could not save: ${e.message}`); }
       });
     }
@@ -2389,7 +2420,7 @@
         if (!ok) return;
         try {
           await api(`/api/commitments/${commitmentId}/sov`, { method: 'PUT', body: JSON.stringify({ lines: [] }) });
-          renderCommitment(projectId, commitmentId);
+          renderCommitment(projectId, commitmentId, tab);
         } catch (e) { toast(e.message); }
       });
     }
@@ -2398,7 +2429,7 @@
       const title = document.getElementById('coTitle').value.trim();
       if (!title) { toast('Give the change order a title'); return; }
       try {
-        await api(`/api/commitments/${commitmentId}/change-orders`, {
+        const created = await api(`/api/commitments/${commitmentId}/change-orders`, {
           method: 'POST',
           body: JSON.stringify({
             title,
@@ -2408,7 +2439,7 @@
             description: document.getElementById('coDescription').value.trim(),
           }),
         });
-        renderCommitment(projectId, commitmentId);
+        navigate(`/project/${projectId}/commitment/${commitmentId}/co/${created.changeOrder.id}`);
       } catch (e) { toast(`Could not add: ${e.message}`); }
     });
 
@@ -2417,7 +2448,7 @@
         try {
           await api(`/api/change-orders/${btn.dataset.approve}`, { method: 'PATCH', body: JSON.stringify({ status: 'approved' }) });
           toast('Approved — it now bills as its own line');
-          renderCommitment(projectId, commitmentId);
+          renderCommitment(projectId, commitmentId, tab);
         } catch (e) { toast(e.message); }
       });
     });
@@ -2425,7 +2456,7 @@
       btn.addEventListener('click', async () => {
         try {
           await api(`/api/change-orders/${btn.dataset.unapprove}`, { method: 'PATCH', body: JSON.stringify({ status: 'pending' }) });
-          renderCommitment(projectId, commitmentId);
+          renderCommitment(projectId, commitmentId, tab);
         } catch (e) { toast(e.message); }
       });
     });
@@ -2447,10 +2478,273 @@
       });
     }
 
+    root.querySelectorAll('[data-open-co]').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        navigate(`/project/${projectId}/commitment/${commitmentId}/co/${btn.dataset.openCo}`);
+      });
+    });
+    (document.getElementById('coRows') || { querySelectorAll: () => [] })
+      .querySelectorAll('tr').forEach((tr) => {
+        tr.addEventListener('click', () => navigate(`/project/${projectId}/commitment/${commitmentId}/co/${tr.dataset.co}`));
+      });
+
     (document.getElementById('appRows') || { querySelectorAll: () => [] })
       .querySelectorAll('tr').forEach((tr) => {
         tr.addEventListener('click', () => navigate(`/project/${projectId}/commitment/${commitmentId}/app/${tr.dataset.app}`));
       });
+  }
+
+  // One change order: its details, its lines, its backup, and the document.
+  async function renderChangeOrder(projectId, commitmentId, changeOrderId) {
+    root.innerHTML = `<div class="card"><p class="help">Loading change order...</p></div>`;
+    let data, project;
+    try {
+      data = await api(`/api/change-orders/${changeOrderId}`);
+      project = (await api(`/api/projects/${projectId}`)).project;
+    } catch (e) {
+      root.innerHTML = `<div class="card"><p class="help">Could not load: ${escapeHtml(e.message)}</p></div>`;
+      return;
+    }
+
+    const co = data.changeOrder;
+    const s = data.sums;
+    const locked = co.status === 'approved';
+    const lines = data.lines.length ? data.lines : [{ budget_code: '', description: '', amount: 0 }];
+
+    const field = (label, id, value, type = 'text', extra = '') =>
+      `<label>${label}<input type="${type}" id="${id}" value="${escapeHtml(value === null || value === undefined ? '' : String(value))}" ${locked ? 'disabled' : ''} ${extra} /></label>`;
+
+    root.innerHTML = `
+      <div class="row between">
+        <div>
+          <h1 style="margin:0;">${escapeHtml(co.number)} &middot; ${escapeHtml(co.title)}</h1>
+          <p class="help" style="margin:4px 0 0;">
+            ${escapeHtml(co.sub_company)} &middot; <span class="pill ${co.status}">${co.status.toUpperCase()}</span>
+          </p>
+        </div>
+        <div class="row" style="gap:8px;">
+          <button class="secondary" id="backBtn">&larr; Change orders</button>
+          <button class="secondary" id="exportPdf">Export PDF</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2 style="margin-top:0;">Details</h2>
+        <div class="field-grid">
+          ${field('TITLE', 'coTitle', co.title)}
+          ${field('CHANGE REASON', 'coReason', co.reason || '')}
+          ${field('LOCATION', 'coLocation', co.location || '')}
+          ${field('REQUEST RECEIVED FROM', 'coRequestedFrom', co.requested_from || '')}
+          ${field('REVIEWED BY', 'coReviewedBy', co.reviewed_by || '')}
+          ${field('FINAL REVIEWER', 'coFinalReviewer', co.final_reviewer || '')}
+          ${field('DUE DATE', 'coDueDate', dateOnly(co.due_date), 'date')}
+          ${field('SCHEDULE IMPACT (DAYS)', 'coScheduleImpact', co.schedule_impact_days || 0, 'number')}
+          ${field('ACCOUNTING METHOD', 'coAccountingMethod', co.accounting_method || 'Amount Based')}
+          ${field('REVISION', 'coRevision', co.revision || 0, 'number')}
+        </div>
+        <label style="display:block;margin-top:12px;">DESCRIPTION
+          <textarea id="coDescription" rows="3" ${locked ? 'disabled' : ''}>${escapeHtml(co.description || '')}</textarea>
+        </label>
+        ${locked ? '' : '<div class="row" style="margin-top:12px;"><button class="primary" id="saveDetails">Save details</button></div>'}
+      </div>
+
+      <div class="card">
+        <h2 style="margin-top:0;">Line items</h2>
+        <table class="grid">
+          <thead><tr><th>#</th><th>Budget code</th><th>Description</th><th class="num">Amount</th><th></th></tr></thead>
+          <tbody id="coLines">
+            ${lines.map((l, i) => `
+              <tr>
+                <td>${i + 1}</td>
+                <td><input type="text" class="co-line" data-field="budgetCode" value="${escapeHtml(l.budget_code || '')}" ${locked ? 'disabled' : ''} /></td>
+                <td><input type="text" class="co-line wide" data-field="description" value="${escapeHtml(l.description || '')}" ${locked ? 'disabled' : ''} /></td>
+                <td class="num"><input type="number" step="0.01" class="co-line cell" data-field="amount" value="${Number(l.amount || 0)}" ${locked ? 'disabled' : ''} /></td>
+                <td>${locked ? '' : '<button class="secondary small remove-line">&times;</button>'}</td>
+              </tr>`).join('')}
+          </tbody>
+          <tfoot><tr><td></td><td></td><td><strong>Grand total</strong></td><td class="num"><strong id="coTotal">${money(s.thisChangeOrder)}</strong></td><td></td></tr></tfoot>
+        </table>
+        ${locked ? '' : `
+          <div class="row" style="margin-top:12px; gap:8px;">
+            <button class="secondary" id="addLine">Add line</button>
+            <button class="primary" id="saveLines">Save lines</button>
+          </div>`}
+      </div>
+
+      <div class="card">
+        <h2 style="margin-top:0;">Attachments</h2>
+        <p class="help">The sub's quote, a marked-up drawing, a photo. PDFs and images print behind the change order in the exported document.</p>
+        <div id="attachmentList">
+          ${data.attachments.length ? data.attachments.map((a) => `
+            <div class="row between attachment">
+              <a href="/api/attachments/${a.id}" target="_blank" rel="noopener">${escapeHtml(a.filename)}</a>
+              <span class="row" style="gap:10px;">
+                <span class="help">${Math.max(1, Math.round(a.size_bytes / 1024))} KB</span>
+                ${locked ? '' : `<button class="secondary small" data-remove-attachment="${a.id}">Remove</button>`}
+              </span>
+            </div>`).join('') : '<p class="help">Nothing attached yet.</p>'}
+        </div>
+        ${locked ? '' : '<input type="file" id="attachFiles" multiple style="margin-top:12px;" />'}
+      </div>
+
+      <div class="card">
+        <h2 style="margin-top:0;">Contract sums</h2>
+        <table class="summary">
+          <tr><td>The original (Contract Sum)</td><td class="num">${money(s.originalContractSum)}</td></tr>
+          <tr><td>Net change by previously authorized Change Orders</td><td class="num">${money(s.netChangeByPrevious)}</td></tr>
+          <tr><td>The contract sum prior to this Change Order was</td><td class="num">${money(s.contractSumPrior)}</td></tr>
+          <tr><td>This Change Order</td><td class="num">${money(s.thisChangeOrder)}</td></tr>
+          <tr class="due"><td>The new contract sum including this Change Order will be</td><td class="num">${money(s.newContractSum)}</td></tr>
+        </table>
+        <p class="help" style="margin-top:10px;">Every figure here is a sum of what's already recorded &mdash; none of them can be typed.</p>
+        ${!project.address1 ? `
+          <div class="field-grid" style="margin-top:14px;">
+            <label>PROJECT ADDRESS<input type="text" id="projAddr1" placeholder="251 Galactic Drive" /></label>
+            <label>CITY, STATE ZIP<input type="text" id="projAddr2" placeholder="Merritt Island, Florida 32952" /></label>
+          </div>
+          <div class="row" style="margin-top:10px;"><button class="secondary" id="saveProjectAddress">Save project address</button></div>
+          <p class="help">The change order document prints the job's address. Set it once and every document after this has it.</p>
+        ` : ''}
+        <div class="row" style="margin-top:16px; gap:8px;">
+          ${locked
+            ? `<button class="secondary" id="unapprove">Un-approve</button>
+               <span class="help">Approved ${co.approved_at ? new Date(co.approved_at).toLocaleDateString() : ''} &mdash; it's in the schedule of values and can be billed.</span>`
+            : `<button class="go-btn" id="approve">Approve &mdash; adds it to the schedule of values</button>`}
+        </div>
+      </div>
+    `;
+
+    document.getElementById('backBtn').addEventListener('click', () => navigate(`/project/${projectId}/commitment/${commitmentId}/changes`));
+    document.getElementById('exportPdf').addEventListener('click', () => {
+      window.open(`/api/change-orders/${changeOrderId}/pdf`, '_blank');
+    });
+
+    const collectLines = () => Array.from(document.querySelectorAll('#coLines tr')).map((tr) => {
+      const get = (f) => {
+        const input = tr.querySelector(`[data-field="${f}"]`);
+        return input ? input.value : '';
+      };
+      return { budgetCode: get('budgetCode'), description: get('description'), amount: Number(get('amount') || 0) };
+    }).filter((l) => l.description.trim());
+
+    const retotal = () => {
+      const total = collectLines().reduce((sum, l) => sum + Math.round(l.amount * 100), 0) / 100;
+      document.getElementById('coTotal').textContent = money(total);
+    };
+    root.querySelectorAll('.co-line').forEach((input) => input.addEventListener('input', retotal));
+
+    const addLine = document.getElementById('addLine');
+    if (addLine) addLine.addEventListener('click', () => {
+      const tbody = document.getElementById('coLines');
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${tbody.children.length + 1}</td>
+        <td><input type="text" class="co-line" data-field="budgetCode" /></td>
+        <td><input type="text" class="co-line wide" data-field="description" /></td>
+        <td class="num"><input type="number" step="0.01" class="co-line cell" data-field="amount" value="0" /></td>
+        <td><button class="secondary small remove-line">&times;</button></td>`;
+      tbody.appendChild(tr);
+      tr.querySelectorAll('.co-line').forEach((i) => i.addEventListener('input', retotal));
+      tr.querySelector('.remove-line').addEventListener('click', () => { tr.remove(); retotal(); });
+    });
+    root.querySelectorAll('.remove-line').forEach((btn) => {
+      btn.addEventListener('click', () => { btn.closest('tr').remove(); retotal(); });
+    });
+
+    const saveLines = document.getElementById('saveLines');
+    if (saveLines) saveLines.addEventListener('click', async () => {
+      try {
+        await api(`/api/change-orders/${changeOrderId}/lines`, { method: 'PUT', body: JSON.stringify({ lines: collectLines() }) });
+        toast('Lines saved');
+        renderChangeOrder(projectId, commitmentId, changeOrderId);
+      } catch (e) { toast(e.message); }
+    });
+
+    const saveDetails = document.getElementById('saveDetails');
+    if (saveDetails) saveDetails.addEventListener('click', async () => {
+      const value = (id) => document.getElementById(id).value;
+      try {
+        await api(`/api/change-orders/${changeOrderId}`, {
+          method: 'PATCH',
+          body: JSON.stringify({
+            title: value('coTitle'), reason: value('coReason'), location: value('coLocation'),
+            requestedFrom: value('coRequestedFrom'), reviewedBy: value('coReviewedBy'),
+            finalReviewer: value('coFinalReviewer'), dueDate: value('coDueDate') || null,
+            scheduleImpactDays: value('coScheduleImpact'), accountingMethod: value('coAccountingMethod'),
+            revision: value('coRevision'), description: value('coDescription'),
+          }),
+        });
+        toast('Saved');
+        renderChangeOrder(projectId, commitmentId, changeOrderId);
+      } catch (e) { toast(e.message); }
+    });
+
+    const attach = document.getElementById('attachFiles');
+    if (attach) attach.addEventListener('change', async () => {
+      if (!attach.files.length) return;
+      const form = new FormData();
+      Array.from(attach.files).forEach((f) => form.append('files', f));
+      toast('Uploading...');
+      try {
+        const token = (function () { try { return localStorage.getItem('scanner-token'); } catch (e) { return null; } })();
+        const response = await fetch(`/api/change-orders/${changeOrderId}/attachments`, {
+          method: 'POST',
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+          credentials: 'same-origin',
+          body: form,
+        });
+        if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || 'Upload failed');
+        renderChangeOrder(projectId, commitmentId, changeOrderId);
+      } catch (e) { toast(e.message); }
+    });
+
+    root.querySelectorAll('[data-remove-attachment]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const ok = await showConfirm('Remove this attachment?', 'Remove');
+        if (!ok) return;
+        try {
+          await api(`/api/attachments/${btn.dataset.removeAttachment}`, { method: 'DELETE' });
+          renderChangeOrder(projectId, commitmentId, changeOrderId);
+        } catch (e) { toast(e.message); }
+      });
+    });
+
+    const saveAddress = document.getElementById('saveProjectAddress');
+    if (saveAddress) saveAddress.addEventListener('click', async () => {
+      try {
+        await api(`/api/projects/${projectId}`, {
+          method: 'PATCH',
+          body: JSON.stringify({
+            address1: document.getElementById('projAddr1').value,
+            address2: document.getElementById('projAddr2').value,
+          }),
+        });
+        toast('Saved');
+        renderChangeOrder(projectId, commitmentId, changeOrderId);
+      } catch (e) { toast(e.message); }
+    });
+
+    const approve = document.getElementById('approve');
+    if (approve) approve.addEventListener('click', async () => {
+      const ok = await showConfirm(
+        `Approve ${co.number} for ${money(s.thisChangeOrder)}? It joins the schedule of values and can be billed from the next application.`,
+        'Approve');
+      if (!ok) return;
+      try {
+        await api(`/api/change-orders/${changeOrderId}`, { method: 'PATCH', body: JSON.stringify({ status: 'approved' }) });
+        toast('Approved — now in the schedule of values');
+        renderChangeOrder(projectId, commitmentId, changeOrderId);
+      } catch (e) { toast(e.message); }
+    });
+
+    const unapprove = document.getElementById('unapprove');
+    if (unapprove) unapprove.addEventListener('click', async () => {
+      try {
+        await api(`/api/change-orders/${changeOrderId}`, { method: 'PATCH', body: JSON.stringify({ status: 'pending' }) });
+        renderChangeOrder(projectId, commitmentId, changeOrderId);
+      } catch (e) { toast(e.message); }
+    });
   }
 
   // The administrator's view of one application: what the sub entered, what

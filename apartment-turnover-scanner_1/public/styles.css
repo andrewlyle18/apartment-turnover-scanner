@@ -554,3 +554,19 @@ table.summary td.num { text-align: right; font-variant-numeric: tabular-nums; wh
 table.summary tr.due td { font-weight: 700; font-size: 16px; border-top: 2px solid #d9e0e7; border-bottom: none; }
 .preview { margin-top: 14px; padding: 14px; background: #f7f9fb; border: 1px solid #e3e8ee; border-radius: 10px; }
 input[type="file"] { font-size: 14px; margin-top: 8px; }
+
+/* ---- Tabs inside a commitment ---- */
+.tabs { display: flex; gap: 4px; margin: 16px 0 0; border-bottom: 1px solid #e3e8ee; }
+.tab {
+  background: none; border: none; border-bottom: 2px solid transparent;
+  padding: 10px 14px; font-family: inherit; font-size: 14px; font-weight: 600;
+  color: #6b7783; cursor: pointer; border-radius: 0;
+}
+.tab:hover { color: var(--brand); }
+.tab.on { color: var(--brand); border-bottom-color: var(--brand); }
+.attachment { padding: 9px 0; border-bottom: 1px solid #f0f3f6; }
+.attachment:last-child { border-bottom: none; }
+.attachment a { color: var(--brand); font-weight: 600; text-decoration: none; word-break: break-all; }
+input.co-line { width: 100%; padding: 7px 8px; font-size: 14px; border: 1px solid #d3dae1; border-radius: 6px; font-family: inherit; }
+input.co-line.wide { min-width: 220px; }
+input.co-line:disabled { background: #f7f9fb; color: #48555f; }
