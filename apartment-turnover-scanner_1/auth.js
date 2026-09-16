@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS users (
   role TEXT NOT NULL DEFAULT 'member',
   password_hash TEXT,
   invite_token TEXT,
+  invite_code TEXT,
   invite_expires TIMESTAMPTZ,
   invited_by INTEGER,
   disabled_at TIMESTAMPTZ,
@@ -38,17 +39,37 @@ CREATE INDEX IF NOT EXISTS sessions_user_idx ON sessions(user_id);
 
 const normalise = (email) => String(email || '').trim().toLowerCase();
 
+// A code someone can read down the phone or write on a scrap of paper.
+// No I, O, 0 or 1 — on site, those get misheard and mistyped every time.
+const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+function makeInviteCode() {
+  const bytes = crypto.randomBytes(8);
+  let code = '';
+  for (let i = 0; i < 8; i++) {
+    code += CODE_ALPHABET[bytes[i] % CODE_ALPHABET.length];
+    if (i === 3) code += '-';
+  }
+  return code; // e.g. K7F2-9PQD
+}
+
+// Typed codes arrive with stray spaces, lower case and missing dashes.
+const tidyCode = (value) =>
+  String(value || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+
 async function initAuth() {
   await pool.query(SCHEMA);
+  // Existing installs predate the typed code.
+  await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS invite_code TEXT');
 
   // Seed the founding administrator exactly once.
   const existing = await pool.query('SELECT id, invite_token, password_hash FROM users WHERE email = $1', [FOUNDER_EMAIL]);
   if (!existing.rows.length) {
     const token = crypto.randomBytes(24).toString('hex');
     await pool.query(
-      `INSERT INTO users (email, name, role, invite_token, invite_expires)
-       VALUES ($1, $2, 'admin', $3, now() + interval '30 days')`,
-      [FOUNDER_EMAIL, 'Andrew Lyle', token]
+      `INSERT INTO users (email, name, role, invite_token, invite_code, invite_expires)
+       VALUES ($1, $2, 'admin', $3, $4, now() + interval '30 days')`,
+      [FOUNDER_EMAIL, 'Andrew Lyle', token, makeInviteCode()]
     );
     console.log('[auth] Founding admin seeded. Claim the account at: /login.html?invite=' + token);
   } else if (!existing.rows[0].password_hash && !existing.rows[0].invite_token) {
@@ -194,15 +215,35 @@ function mountAuthRoutes(app) {
     const problem = passwordProblem(password);
     if (problem) return res.status(400).json({ error: problem });
 
-    const result = await pool.query(
-      'SELECT * FROM users WHERE invite_token = $1 AND invite_expires > now()',
-      [token]
-    );
+    // Two ways in: the long token from a link, or an email plus the short
+    // code an administrator read out. The code is deliberately short enough
+    // to dictate, so it only works alongside the matching email address.
+    const email = normalise(req.body && req.body.email);
+    const code = tidyCode(req.body && req.body.code);
+
+    let result;
+    if (token) {
+      result = await pool.query(
+        'SELECT * FROM users WHERE invite_token = $1 AND invite_expires > now()',
+        [token]
+      );
+    } else if (email && code) {
+      result = await pool.query(
+        `SELECT * FROM users
+         WHERE email = $1 AND invite_code IS NOT NULL
+           AND replace(upper(invite_code), '-', '') = $2
+           AND invite_expires > now()`,
+        [email, code]
+      );
+    } else {
+      return res.status(400).json({ error: 'Enter your email address and the invite code you were given.' });
+    }
+
     const user = result.rows[0];
-    if (!user) return res.status(400).json({ error: 'That invite link is invalid or has expired.' });
+    if (!user) return res.status(400).json({ error: 'That email and code don\u2019t match an open invite. Check with whoever invited you — codes expire after 14 days.' });
 
     await pool.query(
-      `UPDATE users SET password_hash = $1, invite_token = NULL, invite_expires = NULL,
+      `UPDATE users SET password_hash = $1, invite_token = NULL, invite_code = NULL, invite_expires = NULL,
                         name = COALESCE(NULLIF($2, ''), name), last_login = now()
        WHERE id = $3`,
       [hashPassword(password), name, user.id]
@@ -243,6 +284,7 @@ function mountAuthRoutes(app) {
   app.get('/api/users', requireAuth, requireAdmin, async (req, res) => {
     const result = await pool.query(
       `SELECT id, email, name, role, last_login, created_at, disabled_at,
+              invite_code, invite_expires,
               (invite_token IS NOT NULL) AS pending
        FROM users ORDER BY role DESC, email`
     );
@@ -256,15 +298,17 @@ function mountAuthRoutes(app) {
     if (!email || !email.includes('@')) return res.status(400).json({ error: 'A valid email address is required' });
 
     const token = crypto.randomBytes(24).toString('hex');
+    const code = makeInviteCode();
     await pool.query(
-      `INSERT INTO users (email, name, role, invite_token, invite_expires, invited_by)
-       VALUES ($1, $2, $3, $4, now() + interval '14 days', $5)
+      `INSERT INTO users (email, name, role, invite_token, invite_code, invite_expires, invited_by)
+       VALUES ($1, $2, $3, $4, $5, now() + interval '14 days', $6)
        ON CONFLICT (email) DO UPDATE
          SET invite_token = EXCLUDED.invite_token,
+             invite_code = EXCLUDED.invite_code,
              invite_expires = EXCLUDED.invite_expires,
              role = EXCLUDED.role,
              disabled_at = NULL`,
-      [email, name, role, token, req.user ? req.user.id : null]
+      [email, name, role, token, code, req.user ? req.user.id : null]
     );
 
     const base = `${req.protocol}://${req.get('host')}`;
@@ -277,7 +321,10 @@ function mountAuthRoutes(app) {
 
     // If email isn't configured (or bounced), hand the link back so the admin
     // can pass it on themselves rather than the invite silently going nowhere.
-    res.json({ ok: true, emailed: sent.ok, link: sent.ok ? null : link, emailError: sent.error || null });
+    // The code is the point now: an administrator reads it out, the person
+    // types it with their email. The link is still there for anyone who'd
+    // rather paste one.
+    res.json({ ok: true, code, link, emailed: sent.ok, emailError: sent.error || null });
   });
 
   app.patch('/api/users/:id', requireAuth, requireAdmin, async (req, res) => {
