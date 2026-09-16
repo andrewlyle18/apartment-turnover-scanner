@@ -570,3 +570,10 @@ input[type="file"] { font-size: 14px; margin-top: 8px; }
 input.co-line { width: 100%; padding: 7px 8px; font-size: 14px; border: 1px solid #d3dae1; border-radius: 6px; font-family: inherit; }
 input.co-line.wide { min-width: 220px; }
 input.co-line:disabled { background: #f7f9fb; color: #48555f; }
+.menu-actions { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.menu-actions button { width: 100%; text-align: left; padding: 12px 14px; }
+button.danger-quiet {
+  background: #fff; border: 1px solid #f0c9c9; color: #a11b1b;
+  font-family: inherit; font-size: 14px; font-weight: 600; border-radius: 8px; cursor: pointer;
+}
+button.danger-quiet:hover { background: #fdf5f5; }

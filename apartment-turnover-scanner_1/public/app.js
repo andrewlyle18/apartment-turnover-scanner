@@ -18,6 +18,32 @@
     setTimeout(() => el.remove(), 2200);
   }
 
+  /** What the pencil on a project tile opens. Rename is the everyday action;
+   *  moving a job to the trash sits behind it rather than on the tile. */
+  function showProjectMenu(projectName) {
+    return new Promise((resolve) => {
+      const overlay = document.createElement('div');
+      overlay.className = 'confirm-overlay';
+      overlay.innerHTML = `
+        <div class="confirm-box">
+          <p><strong>${escapeHtml(projectName)}</strong></p>
+          <div class="menu-actions">
+            <button class="secondary" data-action="rename">Rename project</button>
+            <button class="danger-quiet" data-action="trash">Move to trash&hellip;</button>
+          </div>
+          <div class="row" style="justify-content:flex-end; margin-top:12px;">
+            <button class="secondary" data-action="cancel">Cancel</button>
+          </div>
+        </div>`;
+      document.body.appendChild(overlay);
+      const done = (result) => { overlay.remove(); resolve(result); };
+      overlay.querySelectorAll('[data-action]').forEach((button) => {
+        button.addEventListener('click', () => done(button.dataset.action === 'cancel' ? null : button.dataset.action));
+      });
+      overlay.addEventListener('click', (e) => { if (e.target === overlay) done(null); });
+    });
+  }
+
   // Custom in-page confirm modal (native window.confirm() blocks the whole
   // tab in a way that can hang automated/embedded contexts, so we avoid it).
   function showConfirm(message, confirmLabel) {
@@ -291,8 +317,7 @@
     const grid = document.getElementById('projectGrid');
     grid.innerHTML = projects.map((p) => `
       <div class="unit-tile project-tile ${p.totalUnits > 0 && p.completeUnits === p.totalUnits ? 'complete' : (p.doneItems > 0 ? 'inprogress' : '')}" data-id="${p.id}">
-        ${canManage ? `<button class="project-delete" data-id="${p.id}" aria-label="Move project to trash">&#128465;</button>
-        <button class="project-edit" data-id="${p.id}" aria-label="Rename project">&#9998;</button>` : ''}
+        ${canManage ? `<button class="project-edit" data-id="${p.id}" aria-label="Edit project">&#9998;</button>` : ''}
         ${p.totalUnits > 0 && p.completeUnits === p.totalUnits ? '<div class="check">&#10003;</div>' : ''}
         <div class="unit-num">${escapeHtml(p.name)}</div>
         <div class="unit-progress">${p.completeUnits}/${p.totalUnits} units</div>
@@ -301,35 +326,44 @@
     grid.querySelectorAll('.project-tile').forEach((el) => {
       el.addEventListener('click', () => navigate(`/project/${el.dataset.id}`));
     });
-    grid.querySelectorAll('.project-delete').forEach((btn) => {
-      btn.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        const id = btn.dataset.id;
-        const proj = projects.find((p) => String(p.id) === String(id));
-        const ok = await showConfirm(`Move "${proj ? proj.name : 'this project'}" to the trash? You can restore it later from Trash.`, 'Move to trash');
-        if (!ok) return;
-        try {
-          await api(`/api/projects/${id}`, { method: 'DELETE' });
-          toast('Moved to trash');
-          renderProjects();
-        } catch (err) {
-          toast(`Could not move to trash: ${err.message}`);
-        }
-      });
-    });
     grid.querySelectorAll('.project-edit').forEach((btn) => {
       btn.addEventListener('click', async (e) => {
         e.stopPropagation();
         const id = btn.dataset.id;
         const proj = projects.find((p) => String(p.id) === String(id));
-        const newName = await showPrompt('Rename project', proj ? proj.name : '', 'Save');
-        if (!newName) return;
-        try {
-          await api(`/api/projects/${id}`, { method: 'PATCH', body: JSON.stringify({ name: newName }) });
-          toast('Project renamed');
-          renderProjects();
-        } catch (err) {
-          toast(`Could not rename: ${err.message}`);
+        const choice = await showProjectMenu(proj ? proj.name : 'this project');
+
+        if (choice === 'rename') {
+          const newName = await showPrompt('Rename project', proj ? proj.name : '', 'Save');
+          if (!newName) return;
+          try {
+            await api(`/api/projects/${id}`, { method: 'PATCH', body: JSON.stringify({ name: newName }) });
+            toast('Project renamed');
+            renderProjects();
+          } catch (err) {
+            toast(`Could not rename: ${err.message}`);
+          }
+          return;
+        }
+
+        if (choice === 'trash') {
+          // Binning a job with hundreds of scanned units should take more than
+          // a stray tap, so the name has to be typed out.
+          const typed = await showPrompt(
+            `Move "${proj ? proj.name : 'this project'}" to the trash? Type the project name to confirm.`,
+            '', 'Move to trash');
+          if (!typed) return;
+          if (typed.trim().toLowerCase() !== String(proj ? proj.name : '').trim().toLowerCase()) {
+            toast("That name doesn't match — nothing was moved");
+            return;
+          }
+          try {
+            await api(`/api/projects/${id}`, { method: 'DELETE' });
+            toast('Moved to trash');
+            renderProjects();
+          } catch (err) {
+            toast(`Could not move to trash: ${err.message}`);
+          }
         }
       });
     });
