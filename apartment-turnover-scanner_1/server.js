@@ -3,6 +3,7 @@ const multer = require('multer');
 const path = require('path');
 const XLSX = require('xlsx');
 const { pool, initSchema } = require('./db');
+const { initAuth, attachUser, requireAuth, mountAuthRoutes, ENFORCED } = require('./auth');
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
@@ -19,6 +20,19 @@ app.use(express.static(path.join(__dirname, 'public'), {
     }
   },
 }));
+
+// Who is this, if anyone? Attached to every request; never rejects.
+app.use(attachUser);
+mountAuthRoutes(app);
+
+// Everything under /api is protected once AUTH_ENFORCED is on, apart from the
+// sign-in routes themselves and the health check. One gate in front of all of
+// them, so a route added later can't accidentally be left open.
+app.use('/api', (req, res, next) => {
+  if (!ENFORCED()) return next();
+  if (req.path.startsWith('/auth/') || req.path === '/health') return next();
+  return requireAuth(req, res, next);
+});
 
 // ---------- Projects ----------
 async function loadProjectsWithStats(whereClause) {
@@ -669,7 +683,9 @@ app.get('/api/health', (req, res) => res.json({ ok: true }));
 const PORT = process.env.PORT || 3000;
 
 initSchema()
+  .then(() => initAuth())
   .then(() => {
+    console.log(`[auth] Sign-in enforcement is ${ENFORCED() ? 'ON' : 'OFF'}`);
     app.listen(PORT, () => console.log(`Appliance scanner listening on :${PORT}`));
   })
   .catch((e) => {
