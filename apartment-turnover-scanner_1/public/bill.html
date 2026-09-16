@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#07354D" />
+<title>Application for Payment</title>
+<link rel="icon" type="image/png" href="/favicon.png?v=3" />
+<style>
+  :root { --brand:#07354D; --green:#1a9e4f; --line:#e3e8ee; --muted:#6b7783; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: #f4f6f8; color: #0b1f2a;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    padding-bottom: 150px;
+  }
+  header { background: var(--brand); color: #fff; padding: 20px 18px; }
+  header .inner, main { max-width: 1040px; margin: 0 auto; }
+  header h1 { margin: 0; font-size: 20px; }
+  header p { margin: 5px 0 0; font-size: 14px; opacity: .85; }
+  main { padding: 18px 16px 0; }
+  .card { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+  .note { font-size: 14px; color: var(--muted); line-height: 1.55; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th { text-align: left; font-size: 10.5px; letter-spacing: .4px; color: var(--muted);
+       border-bottom: 1px solid var(--line); padding: 8px 8px; white-space: nowrap; }
+  td { padding: 8px; border-bottom: 1px solid #f0f3f6; vertical-align: middle; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  tr.section td { background: #f4f6f8; font-weight: 700; font-size: 11px; letter-spacing: .4px;
+                  text-transform: uppercase; color: #48555f; }
+  tr.total td { background: #fbfcfd; font-weight: 700; border-top: 1px solid #d9e0e7; }
+  input.entry {
+    width: 92px; padding: 8px; font-size: 16px; text-align: right; border: 1px solid #d3dae1;
+    border-radius: 8px; font-variant-numeric: tabular-nums; font-family: inherit;
+  }
+  input.entry:focus { outline: 2px solid var(--brand); outline-offset: -1px; }
+  input.entry:disabled { background: #f7f9fb; color: #48555f; }
+  .desc { min-width: 180px; }
+  .scroll { overflow-x: auto; }
+  .summary {
+    position: fixed; left: 0; right: 0; bottom: 0; background: #fff;
+    border-top: 1px solid var(--line); box-shadow: 0 -6px 20px rgba(9,30,45,.07); padding: 12px 16px;
+  }
+  .summary .inner { max-width: 1040px; margin: 0 auto; display: flex; flex-wrap: wrap;
+                    gap: 18px; align-items: center; }
+  .fig { display: flex; flex-direction: column; }
+  .fig .label { font-size: 10.5px; letter-spacing: .4px; color: var(--muted); }
+  .fig .value { font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .fig.due .value { color: var(--green); font-size: 21px; }
+  .grow { flex: 1; }
+  button {
+    font-family: inherit; font-size: 15px; font-weight: 700; padding: 13px 18px;
+    border-radius: 9px; border: none; cursor: pointer; background: var(--green); color: #fff;
+  }
+  button.secondary { background: #fff; border: 1px solid #d3dae1; color: #0b1f2a; font-weight: 600; }
+  button:disabled { opacity: .55; cursor: default; }
+  .saved { font-size: 12.5px; color: var(--muted); }
+  .banner { padding: 12px 14px; border-radius: 9px; font-size: 14px; margin-bottom: 16px; }
+  .banner.done { background: #e8f6ed; color: #15683a; }
+  .banner.warn { background: #fdf3e2; color: #8a5a12; }
+  .banner.error { background: #fdecec; color: #a11b1b; }
+  .signrow { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
+  .signrow label { display: flex; flex-direction: column; font-size: 10.5px; letter-spacing: .5px;
+                   color: var(--muted); font-weight: 700; gap: 4px; }
+  .signrow input { padding: 11px; font-size: 16px; border: 1px solid #d3dae1; border-radius: 8px;
+                   font-family: inherit; font-weight: 400; color: #0b1f2a; min-width: 220px; }
+  @media (max-width: 620px) {
+    .fig .value { font-size: 15px; }
+    .fig.due .value { font-size: 18px; }
+    input.entry { width: 78px; }
+  }
+</style>
+</head>
+<body>
+  <header>
+    <div class="inner">
+      <h1 id="company">Application for Payment</h1>
+      <p id="subtitle">Loading…</p>
+    </div>
+  </header>
+
+  <main id="main">
+    <div class="card"><p class="note">Loading your application…</p></div>
+  </main>
+
+<script>
+(function () {
+  const token = new URLSearchParams(location.search).get('t');
+  const main = document.getElementById('main');
+  let data = null;
+  let saveTimer = null;
+
+  const money = (v) => Number(v || 0).toLocaleString('en-US', { style: 'currency', currency: 'USD' });
+  const pct = (v) => `${(Number(v || 0) * 100).toFixed(1)}%`;
+  const escapeHtml = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const dateOnly = (v) => (v ? String(v).slice(0, 10) : '');
+
+  async function api(url, options) {
+    const opts = Object.assign({ headers: { 'Content-Type': 'application/json' } }, options || {});
+    const response = await fetch(url, opts);
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || 'Something went wrong');
+    return body;
+  }
+
+  function render() {
+    const open = data.payApp.status === 'open';
+    const c = data.commitment;
+    const p = data.payApp;
+
+    document.getElementById('company').textContent = c.subCompany;
+    document.getElementById('subtitle').textContent =
+      `${c.title}${c.number ? ` · ${c.number}` : ''} · Application #${p.number}` +
+      (p.periodStart ? ` · ${dateOnly(p.periodStart)} to ${dateOnly(p.periodEnd)}` : '');
+
+    const line = (l) => `
+      <tr data-line="${l.id}">
+        <td>${escapeHtml(l.itemNo || '')}</td>
+        <td class="desc">${escapeHtml(l.description)}</td>
+        <td class="num">${money(l.scheduledValue)}</td>
+        <td class="num">${money(l.previousCompleted)}</td>
+        <td class="num">${open
+          ? `<input class="entry" type="number" min="0" max="100" step="0.1" data-field="percent" value="${(l.percent * 100).toFixed(1)}" />`
+          : pct(l.percent)}</td>
+        <td class="num">${open
+          ? `<input class="entry" type="number" min="0" step="0.01" data-field="thisPeriod" value="${l.thisPeriod}" />`
+          : money(l.thisPeriod)}</td>
+        <td class="num">${open
+          ? `<input class="entry" type="number" min="0" step="0.01" data-field="materialsStored" value="${l.materialsStored}" />`
+          : money(l.materialsStored)}</td>
+        <td class="num">${money(l.totalCompleted)}</td>
+        <td class="num">${money(l.balanceToFinish)}</td>
+      </tr>`;
+
+    const block = (rows, title, totals) => rows.length ? `
+      <tr class="section"><td colspan="9">${title}</td></tr>
+      ${rows.map(line).join('')}
+      <tr class="total">
+        <td></td><td>Total</td>
+        <td class="num">${money(totals.scheduledValue)}</td>
+        <td class="num">${money(totals.previousCompleted)}</td>
+        <td class="num">${pct(totals.percent)}</td>
+        <td class="num">${money(totals.thisPeriod)}</td>
+        <td class="num">${money(totals.materialsStored)}</td>
+        <td class="num">${money(totals.totalCompleted)}</td>
+        <td class="num">${money(totals.balanceToFinish)}</td>
+      </tr>` : '';
+
+    const banner = open
+      ? `<div class="banner warn">Fill in what you completed this period, then sign and submit at the bottom.
+           Type either a percent or a dollar amount on each line &mdash; the other updates itself.</div>`
+      : `<div class="banner done">Submitted${p.submittedAt ? ` on ${new Date(p.submittedAt).toLocaleDateString()}` : ''}${p.signerName ? ` by ${escapeHtml(p.signerName)}` : ''}.
+           Download your copies below. If something needs changing, ask ${escapeHtml(c.contractorName)} to reopen it.</div>`;
+
+    main.innerHTML = `
+      ${banner}
+      <div class="card scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Item</th><th>Description</th><th class="num">Scheduled</th><th class="num">Previous</th>
+              <th class="num">% complete</th><th class="num">This period</th><th class="num">Stored</th>
+              <th class="num">Total to date</th><th class="num">Balance</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${block(data.lines.filter((l) => l.source !== 'co'), 'Contract lines', data.base)}
+            ${block(data.lines.filter((l) => l.source === 'co'), 'Change orders', data.changeOrders)}
+          </tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        ${open ? `
+          <h2 style="margin:0 0 4px; font-size:16px;">Sign and submit</h2>
+          <p class="note" style="margin:0 0 14px;">Your name below stands as your signature on the application and the conditional waiver.</p>
+          <div class="signrow">
+            <label>YOUR NAME<input type="text" id="signerName" autocomplete="name" /></label>
+            <label>TITLE<input type="text" id="signerTitle" placeholder="Owner" /></label>
+            <button id="submitBtn">Submit application</button>
+          </div>
+          <div class="banner error" id="submitError" style="display:none;"></div>
+        ` : `
+          <h2 style="margin:0 0 4px; font-size:16px;">Your documents</h2>
+          <p class="note" style="margin:0 0 14px;">Both are generated from the figures on this page.</p>
+          <div class="signrow">
+            <button class="secondary" id="downloadApp">Download pay application</button>
+            <button class="secondary" id="downloadWaiver">Download conditional waiver</button>
+          </div>
+        `}
+      </div>
+    `;
+
+    if (open) {
+      main.querySelectorAll('input.entry').forEach((input) => {
+        input.addEventListener('input', onEntry);
+        input.addEventListener('focus', () => input.select());
+      });
+      document.getElementById('submitBtn').addEventListener('click', submit);
+    } else {
+      document.getElementById('downloadApp').addEventListener('click', () => {
+        window.location.href = `/api/bill/${token}/pdf/application`;
+      });
+      document.getElementById('downloadWaiver').addEventListener('click', () => {
+        window.location.href = `/api/bill/${token}/pdf/waiver`;
+      });
+    }
+
+    renderSummary();
+  }
+
+  function renderSummary() {
+    const s = data.summary;
+    const open = data.payApp.status === 'open';
+    let bar = document.querySelector('.summary');
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.className = 'summary';
+      document.body.appendChild(bar);
+    }
+    bar.innerHTML = `
+      <div class="inner">
+        <div class="fig"><span class="label">THIS PERIOD</span><span class="value">${money(data.grand.thisPeriod)}</span></div>
+        <div class="fig"><span class="label">COMPLETED TO DATE</span><span class="value">${money(s.totalCompletedAndStored)}</span></div>
+        <div class="fig"><span class="label">RETAINAGE</span><span class="value">${money(s.totalRetainage)}</span></div>
+        <div class="fig"><span class="label">LESS PREVIOUS</span><span class="value">${money(s.previousCertificates)}</span></div>
+        <div class="fig due"><span class="label">CURRENT PAYMENT DUE</span><span class="value">${money(s.currentPaymentDue)}</span></div>
+        <div class="grow"></div>
+        <span class="saved" id="savedNote">${open ? 'Saved automatically' : 'Submitted'}</span>
+      </div>`;
+  }
+
+  // Percent and dollars are two views of the same number. Typing in one moves
+  // the other, so nobody has to work out 62% of 2,905.56 on a phone.
+  function onEntry(event) {
+    const input = event.target;
+    const row = input.closest('tr');
+    const id = Number(row.dataset.line);
+    const stored = data.lines.find((l) => l.id === id);
+    if (!stored) return;
+
+    const field = input.dataset.field;
+    const value = Number(input.value || 0);
+    const scheduled = Number(stored.scheduledValue);
+    const previous = Number(stored.previousCompleted);
+
+    if (field === 'percent') {
+      const target = Math.max(0, Math.min(100, value)) / 100 * scheduled;
+      const thisPeriod = Math.max(0, Math.round((target - previous) * 100) / 100);
+      row.querySelector('[data-field="thisPeriod"]').value = thisPeriod;
+    } else if (field === 'thisPeriod') {
+      const total = previous + value + Number(row.querySelector('[data-field="materialsStored"]').value || 0);
+      row.querySelector('[data-field="percent"]').value = scheduled ? (total / scheduled * 100).toFixed(1) : '0.0';
+    }
+
+    note('Saving…');
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(save, 700);
+  }
+
+  function note(text) {
+    const el = document.getElementById('savedNote');
+    if (el) el.textContent = text;
+  }
+
+  function collect() {
+    return Array.from(main.querySelectorAll('tr[data-line]')).map((row) => ({
+      id: Number(row.dataset.line),
+      thisPeriod: Number(row.querySelector('[data-field="thisPeriod"]').value || 0),
+      materialsStored: Number(row.querySelector('[data-field="materialsStored"]').value || 0),
+    }));
+  }
+
+  // Saved as they type, so a half-finished application is never lost — and
+  // the contractor can see it before it's submitted.
+  async function save() {
+    try {
+      const focused = document.activeElement;
+      const key = focused && focused.closest('tr')
+        ? `${focused.closest('tr').dataset.line}:${focused.dataset.field}`
+        : null;
+
+      const fresh = await api(`/api/bill/${token}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ lines: collect() }),
+      });
+      data = fresh;
+
+      // Put back anything the server corrected (an over-billed line), without
+      // yanking the box the person is typing in.
+      data.lines.forEach((l) => {
+        const row = main.querySelector(`tr[data-line="${l.id}"]`);
+        if (!row) return;
+        const fields = { thisPeriod: l.thisPeriod, materialsStored: l.materialsStored, percent: (l.percent * 100).toFixed(1) };
+        Object.entries(fields).forEach(([field, value]) => {
+          const input = row.querySelector(`[data-field="${field}"]`);
+          if (input && `${l.id}:${field}` !== key) input.value = value;
+        });
+        const cells = row.querySelectorAll('td');
+        cells[7].textContent = money(l.totalCompleted);
+        cells[8].textContent = money(l.balanceToFinish);
+      });
+      renderSummary();
+      note('Saved');
+    } catch (e) {
+      note(`Not saved — ${e.message}`);
+    }
+  }
+
+  async function submit() {
+    const name = document.getElementById('signerName').value.trim();
+    const error = document.getElementById('submitError');
+    const button = document.getElementById('submitBtn');
+    if (!name) {
+      error.textContent = 'Type your name to sign the application.';
+      error.style.display = 'block';
+      return;
+    }
+    button.disabled = true;
+    error.style.display = 'none';
+    try {
+      clearTimeout(saveTimer);
+      await api(`/api/bill/${token}`, { method: 'PATCH', body: JSON.stringify({ lines: collect() }) });
+      data = await api(`/api/bill/${token}/submit`, {
+        method: 'POST',
+        body: JSON.stringify({ signerName: name, signerTitle: document.getElementById('signerTitle').value }),
+      });
+      render();
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    } catch (e) {
+      error.textContent = e.message;
+      error.style.display = 'block';
+      button.disabled = false;
+    }
+  }
+
+  (async function start() {
+    if (!token) {
+      main.innerHTML = '<div class="banner error">This link is missing its code. Ask for a new one.</div>';
+      return;
+    }
+    try {
+      data = await api(`/api/bill/${token}`);
+      render();
+    } catch (e) {
+      main.innerHTML = `<div class="banner error">${escapeHtml(e.message)}</div>`;
+    }
+  })();
+})();
+</script>
+</body>
+</html>

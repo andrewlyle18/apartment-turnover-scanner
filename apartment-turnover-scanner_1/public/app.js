@@ -2671,13 +2671,14 @@
           <tr class="due"><td>The new contract sum including this Change Order will be</td><td class="num">${money(s.newContractSum)}</td></tr>
         </table>
         <p class="help" style="margin-top:10px;">Every figure here is a sum of what's already recorded &mdash; none of them can be typed.</p>
-        ${!project.address1 ? `
+        ${!project.address1 || !project.owner_name ? `
           <div class="field-grid" style="margin-top:14px;">
-            <label>PROJECT ADDRESS<input type="text" id="projAddr1" placeholder="251 Galactic Drive" /></label>
-            <label>CITY, STATE ZIP<input type="text" id="projAddr2" placeholder="Merritt Island, Florida 32952" /></label>
+            <label>PROJECT ADDRESS<input type="text" id="projAddr1" value="${escapeHtml(project.address1 || '')}" placeholder="251 Galactic Drive" /></label>
+            <label>CITY, STATE ZIP<input type="text" id="projAddr2" value="${escapeHtml(project.address2 || '')}" placeholder="Merritt Island, Florida 32952" /></label>
+            <label>PROPERTY OWNER<input type="text" id="projOwner" value="${escapeHtml(project.owner_name || '')}" placeholder="Fortenberry Apartments Venture, LP" /></label>
           </div>
           <div class="row" style="margin-top:10px;"><button class="secondary" id="saveProjectAddress">Save project address</button></div>
-          <p class="help">The change order document prints the job's address. Set it once and every document after this has it.</p>
+          <p class="help">The change order prints the job's address; the conditional waiver names the property owner. Set them once and every document after this has them.</p>
         ` : ''}
         <div class="row between" style="margin-top:16px; gap:8px;">
           <span class="row" style="gap:8px;">
@@ -2794,11 +2795,19 @@
           body: JSON.stringify({
             address1: document.getElementById('projAddr1').value,
             address2: document.getElementById('projAddr2').value,
+            ownerName: document.getElementById('projOwner').value,
           }),
         });
         toast('Saved');
         renderChangeOrder(projectId, commitmentId, changeOrderId);
       } catch (e) { toast(e.message); }
+    });
+
+    document.getElementById('pdfApp').addEventListener('click', () => {
+      window.open(`/api/pay-apps/${payAppId}/pdf/application`, '_blank');
+    });
+    document.getElementById('pdfWaiver').addEventListener('click', () => {
+      window.open(`/api/pay-apps/${payAppId}/pdf/waiver`, '_blank');
     });
 
     const approve = document.getElementById('approve');
@@ -2943,10 +2952,16 @@
           <tr><td>9. Balance to finish, including retainage</td><td class="num">${money(s.balanceToFinishIncludingRetainage)}</td></tr>
         </table>
         ${p.signer_name ? `<p class="help" style="margin-top:12px;">Signed ${escapeHtml(p.signer_name)}${p.signer_title ? `, ${escapeHtml(p.signer_title)}` : ''} on ${new Date(p.submitted_at).toLocaleString()}</p>` : ''}
-        <div class="row" style="margin-top:14px; gap:8px;">
-          ${p.status === 'approved'
-            ? `<button class="secondary" id="reopen">Reopen for changes</button>`
-            : `<button class="go-btn" id="approve">Approve application</button>`}
+        <div class="row between" style="margin-top:14px; gap:8px;">
+          <span class="row" style="gap:8px;">
+            ${p.status === 'approved'
+              ? `<button class="secondary" id="reopen">Reopen for changes</button>`
+              : `<button class="go-btn" id="approve">Approve application</button>`}
+          </span>
+          <span class="row" style="gap:8px;">
+            <button class="secondary" id="pdfApp">Pay application PDF</button>
+            <button class="secondary" id="pdfWaiver">Conditional waiver PDF</button>
+          </span>
         </div>
       </div>
     `;
