@@ -3,7 +3,7 @@ const multer = require('multer');
 const path = require('path');
 const XLSX = require('xlsx');
 const { pool, initSchema } = require('./db');
-const { initAuth, attachUser, requireAuth, mountAuthRoutes, ENFORCED } = require('./auth');
+const { initAuth, attachUser, requireAuth, adminOnly, mountAuthRoutes, ENFORCED } = require('./auth');
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
@@ -78,12 +78,12 @@ app.get('/api/projects', async (req, res) => {
 // Trashed projects — "moved to trash" but not permanently deleted, so they
 // can be restored later. Must be declared before /api/projects/:id so
 // "trash" isn't matched as an :id.
-app.get('/api/projects/trash', async (req, res) => {
+app.get('/api/projects/trash', adminOnly, async (req, res) => {
   const projects = await loadProjectsWithStats('trashed_at IS NOT NULL');
   res.json({ projects });
 });
 
-app.post('/api/projects', async (req, res) => {
+app.post('/api/projects', adminOnly, async (req, res) => {
   const name = String((req.body && req.body.name) || '').trim();
   if (!name) return res.status(400).json({ error: 'Project name is required' });
   const result = await pool.query('INSERT INTO projects (name) VALUES ($1) RETURNING id, name, created_at', [name]);
@@ -96,7 +96,7 @@ app.get('/api/projects/:id', async (req, res) => {
   res.json({ project: result.rows[0] });
 });
 
-app.patch('/api/projects/:id', async (req, res) => {
+app.patch('/api/projects/:id', adminOnly, async (req, res) => {
   const name = String((req.body && req.body.name) || '').trim();
   if (!name) return res.status(400).json({ error: 'Project name is required' });
   const result = await pool.query(
@@ -109,7 +109,7 @@ app.patch('/api/projects/:id', async (req, res) => {
 
 // Moves a project to the trash (soft delete) rather than deleting it —
 // it stays fully intact and can be restored from /api/projects/trash.
-app.delete('/api/projects/:id', async (req, res) => {
+app.delete('/api/projects/:id', adminOnly, async (req, res) => {
   const result = await pool.query(
     'UPDATE projects SET trashed_at = now() WHERE id = $1 AND trashed_at IS NULL RETURNING id',
     [req.params.id]
@@ -118,7 +118,7 @@ app.delete('/api/projects/:id', async (req, res) => {
   res.json({ ok: true });
 });
 
-app.post('/api/projects/:id/restore', async (req, res) => {
+app.post('/api/projects/:id/restore', adminOnly, async (req, res) => {
   const result = await pool.query(
     'UPDATE projects SET trashed_at = NULL WHERE id = $1 AND trashed_at IS NOT NULL RETURNING id, name, created_at',
     [req.params.id]
@@ -141,7 +141,7 @@ app.post('/api/projects/:id/restore', async (req, res) => {
 //  2. No recognizable header: each row simply lists, in the columns after
 //     the unit number, the appliances present in THAT unit (free-form,
 //     can differ per row).
-app.post('/api/import', upload.single('file'), async (req, res) => {
+app.post('/api/import', adminOnly, upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
   const projectId = req.body && req.body.projectId ? parseInt(req.body.projectId, 10) : null;
@@ -572,7 +572,7 @@ app.get('/api/patterns/summary', async (req, res) => {
   res.json({ patterns: result.rows });
 });
 
-app.delete('/api/patterns', async (req, res) => {
+app.delete('/api/patterns', adminOnly, async (req, res) => {
   const itemName = String(req.query.itemName || '').trim();
   if (itemName) await pool.query('DELETE FROM label_patterns WHERE lower(item_name) = lower($1)', [itemName]);
   else await pool.query('DELETE FROM label_patterns');

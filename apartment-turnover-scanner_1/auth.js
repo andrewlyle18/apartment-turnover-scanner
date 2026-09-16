@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS users (
   id SERIAL PRIMARY KEY,
   email TEXT NOT NULL UNIQUE,
   name TEXT,
-  role TEXT NOT NULL DEFAULT 'member',
+  role TEXT NOT NULL DEFAULT 'field',
   password_hash TEXT,
   invite_token TEXT,
   invite_code TEXT,
@@ -57,10 +57,17 @@ function makeInviteCode() {
 const tidyCode = (value) =>
   String(value || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 
+// Two kinds of account, and only two. Anything that isn't an administrator is
+// field team: they scan, and that's the whole of it.
+const asRole = (value) => (String(value || '').toLowerCase() === 'admin' ? 'admin' : 'field');
+
 async function initAuth() {
   await pool.query(SCHEMA);
   // Existing installs predate the typed code.
   await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS invite_code TEXT');
+  // 'member' was the old name for the same thing. One name from here on.
+  await pool.query("UPDATE users SET role = 'field' WHERE role <> 'admin'");
+  await pool.query("ALTER TABLE users ALTER COLUMN role SET DEFAULT 'field'");
 
   // Seed the founding administrator exactly once.
   const existing = await pool.query('SELECT id, invite_token, password_hash FROM users WHERE email = $1', [FOUNDER_EMAIL]);
@@ -168,6 +175,23 @@ function requireAuth(req, res, next) {
   if (!ENFORCED()) return next();
   if (!req.user) return res.status(401).json({ error: 'Sign in required' });
   next();
+}
+
+// For the things only an administrator should be able to do to a job itself:
+// create it, rename it, re-import its unit list, bin it, restore it.
+//
+// Signed in as field team, the answer is always no — even before sign-in is
+// switched on, because by then they've told us who they are. Nobody signed in
+// and sign-in not yet enforced is the old world, which still works as it did.
+function adminOnly(req, res, next) {
+  if (req.user) {
+    if (req.user.role === 'admin') return next();
+    return res.status(403).json({
+      error: 'Only an administrator can change projects. You can scan any unit in them.',
+    });
+  }
+  if (!ENFORCED()) return next();
+  return res.status(401).json({ error: 'Sign in required' });
 }
 
 function requireAdmin(req, res, next) {
@@ -293,7 +317,7 @@ function mountAuthRoutes(app) {
 
   app.post('/api/users', requireAuth, requireAdmin, async (req, res) => {
     const email = normalise(req.body && req.body.email);
-    const role = (req.body && req.body.role) === 'admin' ? 'admin' : 'member';
+    const role = asRole(req.body && req.body.role);
     const name = String((req.body && req.body.name) || '').trim();
     if (!email || !email.includes('@')) return res.status(400).json({ error: 'A valid email address is required' });
 
@@ -331,13 +355,13 @@ function mountAuthRoutes(app) {
     const id = parseInt(req.params.id, 10);
     const body = req.body || {};
 
-    if (body.role === 'member' && id === req.user.id) {
+    if (body.role && asRole(body.role) === 'field' && id === req.user.id) {
       return res.status(400).json({ error: "You can't remove your own administrator access." });
     }
     if (body.role) {
-      const role = body.role === 'admin' ? 'admin' : 'member';
+      const role = asRole(body.role);
       // Never leave the job without an administrator.
-      if (role === 'member') {
+      if (role === 'field') {
         const admins = await pool.query("SELECT COUNT(*)::int AS n FROM users WHERE role = 'admin' AND disabled_at IS NULL");
         if (admins.rows[0].n <= 1) return res.status(400).json({ error: 'There must be at least one administrator.' });
       }
@@ -367,6 +391,7 @@ module.exports = {
   attachUser,
   requireAuth,
   requireAdmin,
+  adminOnly,
   mountAuthRoutes,
   ENFORCED,
 };
