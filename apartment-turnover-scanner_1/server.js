@@ -101,7 +101,7 @@ app.post('/api/projects', adminOnly, async (req, res) => {
 
 app.get('/api/projects/:id', async (req, res) => {
   const result = await pool.query(
-    'SELECT id, name, address1, address2, created_at, trashed_at FROM projects WHERE id = $1', [req.params.id]);
+    'SELECT id, name, address1, address2, owner_name, created_at, trashed_at FROM projects WHERE id = $1', [req.params.id]);
   if (!result.rows.length) return res.status(404).json({ error: 'Project not found' });
   res.json({ project: result.rows[0] });
 });
@@ -111,11 +111,20 @@ app.patch('/api/projects/:id', adminOnly, async (req, res) => {
 
   // The job's address, which the change order document prints. Set from the
   // billing screens; it isn't part of scanning.
-  if (body.name === undefined && (body.address1 !== undefined || body.address2 !== undefined)) {
+  if (body.name === undefined && (body.address1 !== undefined || body.address2 !== undefined || body.ownerName !== undefined)) {
     const updated = await pool.query(
-      `UPDATE projects SET address1 = $1, address2 = $2 WHERE id = $3
-       RETURNING id, name, address1, address2, created_at`,
-      [String(body.address1 || '').trim() || null, String(body.address2 || '').trim() || null, req.params.id]
+      `UPDATE projects SET
+         address1 = COALESCE($1, address1),
+         address2 = COALESCE($2, address2),
+         owner_name = COALESCE($3, owner_name)
+       WHERE id = $4
+       RETURNING id, name, address1, address2, owner_name, created_at`,
+      [
+        body.address1 === undefined ? null : String(body.address1 || '').trim() || null,
+        body.address2 === undefined ? null : String(body.address2 || '').trim() || null,
+        body.ownerName === undefined ? null : String(body.ownerName || '').trim() || null,
+        req.params.id,
+      ]
     );
     if (!updated.rows.length) return res.status(404).json({ error: 'Project not found' });
     return res.json({ project: updated.rows[0] });

@@ -163,6 +163,7 @@ const CO_EXTRA_COLUMNS = `
   ALTER TABLE change_orders ADD COLUMN IF NOT EXISTS final_reviewer TEXT;
   ALTER TABLE projects ADD COLUMN IF NOT EXISTS address1 TEXT;
   ALTER TABLE projects ADD COLUMN IF NOT EXISTS address2 TEXT;
+  ALTER TABLE projects ADD COLUMN IF NOT EXISTS owner_name TEXT;
 `;
 
 async function initBilling() {

@@ -1,5 +1,6 @@
 const { pool } = require('./db');
 const { buildChangeOrderPdf } = require('./change-order-pdf');
+const { buildApplicationPdf, buildWaiverPdf } = require('./payapp-pdf');
 const {
   applicationView,
   changeOrderContext,
@@ -676,6 +677,50 @@ function mountBillingRoutes(app, { adminOnly, upload }) {
     res.json({ ok: true });
   });
 
+  // ---------- The two documents ----------
+
+  async function projectFor(commitmentId) {
+    const row = await pool.query(
+      `SELECT p.id, p.name, p.address1, p.address2, p.owner_name
+       FROM projects p JOIN commitments c ON c.project_id = p.id WHERE c.id = $1`,
+      [commitmentId]
+    );
+    return row.rows[0] || { name: '' };
+  }
+
+  function documentName(view, kind) {
+    const base = `${view.commitment.sub_company} - ${kind} ${view.payApp.number}`;
+    return base.replace(/[^A-Za-z0-9 \-_.']/g, '').slice(0, 80);
+  }
+
+  async function sendApplication(res, view) {
+    const project = await projectFor(view.commitment.id);
+    const pdf = await buildApplicationPdf(view, project);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${documentName(view, 'Pay App')}.pdf"`);
+    res.send(pdf);
+  }
+
+  async function sendWaiver(res, view) {
+    const project = await projectFor(view.commitment.id);
+    const pdf = await buildWaiverPdf(view, project);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${documentName(view, 'Conditional Waiver')}.pdf"`);
+    res.send(pdf);
+  }
+
+  app.get('/api/pay-apps/:id/pdf/application', adminOnly, async (req, res) => {
+    const view = await applicationView(parseInt(req.params.id, 10));
+    if (!view) return res.status(404).json({ error: 'Application not found' });
+    await sendApplication(res, view);
+  });
+
+  app.get('/api/pay-apps/:id/pdf/waiver', adminOnly, async (req, res) => {
+    const view = await applicationView(parseInt(req.params.id, 10));
+    if (!view) return res.status(404).json({ error: 'Application not found' });
+    await sendWaiver(res, view);
+  });
+
   // ---------- The subcontractor's page ----------
   // No account, no sign-in. The token in the link is the only thing that
   // grants access, and it grants access to exactly one application.
@@ -765,6 +810,19 @@ function mountBillingRoutes(app, { adminOnly, upload }) {
       );
     }
     res.json(subView(await applicationView(id)));
+  });
+
+  // The sub downloads their own copies from the same link.
+  app.get('/api/bill/:token/pdf/application', async (req, res) => {
+    const id = await byToken(req.params.token);
+    if (!id) return res.status(404).json({ error: 'This link is no longer valid. Ask for a new one.' });
+    await sendApplication(res, await applicationView(id));
+  });
+
+  app.get('/api/bill/:token/pdf/waiver', async (req, res) => {
+    const id = await byToken(req.params.token);
+    if (!id) return res.status(404).json({ error: 'This link is no longer valid. Ask for a new one.' });
+    await sendWaiver(res, await applicationView(id));
   });
 
   app.post('/api/bill/:token/submit', async (req, res) => {
