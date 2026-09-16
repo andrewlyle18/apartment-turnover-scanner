@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#07354D" />
+<title>Sign in &middot; Serial Number Scanner</title>
+<link rel="icon" type="image/png" href="/favicon.png?v=3" />
+<style>
+  :root {
+    --brand: #07354D;
+    --brand-dark: #052637;
+    --green: #1a9e4f;
+    --silver: #A8B0BC;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    background: var(--brand);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    color: #0b1f2a;
+  }
+  .card {
+    width: 100%;
+    max-width: 380px;
+    background: #fff;
+    border-radius: 16px;
+    overflow: hidden;
+    box-shadow: 0 18px 48px rgba(0,0,0,0.3);
+  }
+  .card-head {
+    background: #fff;
+    padding: 26px 26px 6px;
+    text-align: center;
+  }
+  .card-head img { height: 64px; }
+  .card-head h1 { font-size: 19px; margin: 14px 0 2px; }
+  .card-head p { margin: 0; color: #6b7783; font-size: 14px; }
+  form { padding: 22px 26px 26px; }
+  label {
+    display: block;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.6px;
+    color: #6b7783;
+    margin: 14px 0 5px;
+  }
+  input {
+    width: 100%;
+    padding: 13px 12px;
+    font-size: 16px; /* 16px keeps iOS from zooming on focus */
+    border: 1px solid #d3dae1;
+    border-radius: 9px;
+    font-family: inherit;
+  }
+  input:focus { outline: 2px solid var(--brand); outline-offset: -1px; border-color: var(--brand); }
+  button {
+    width: 100%;
+    margin-top: 20px;
+    padding: 15px;
+    font-size: 16px;
+    font-weight: 700;
+    color: #fff;
+    background: var(--green);
+    border: none;
+    border-radius: 9px;
+    font-family: inherit;
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.6; }
+  .message {
+    margin-top: 16px;
+    padding: 12px 14px;
+    border-radius: 9px;
+    font-size: 14px;
+    display: none;
+  }
+  .message.error { display: block; background: #fdecec; color: #a11b1b; }
+  .message.ok { display: block; background: #e8f6ed; color: #15683a; }
+  .hint { font-size: 13px; color: #6b7783; margin-top: 14px; line-height: 1.5; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="card-head">
+      <img src="/mark.png?v=3" alt="Carter &amp; Carter" />
+      <h1 id="title">Serial Number Scanner</h1>
+      <p id="subtitle">Sign in to continue</p>
+    </div>
+    <form id="form">
+      <div id="nameRow" style="display:none">
+        <label for="name">YOUR NAME</label>
+        <input type="text" id="name" autocomplete="name" />
+      </div>
+
+      <label for="email">EMAIL</label>
+      <input type="email" id="email" autocomplete="username" required />
+
+      <label for="password" id="passwordLabel">PASSWORD</label>
+      <input type="password" id="password" autocomplete="current-password" required />
+
+      <button type="submit" id="submit">Sign in</button>
+      <div class="message" id="message"></div>
+      <p class="hint" id="hint"></p>
+    </form>
+  </div>
+
+<script>
+(function () {
+  const params = new URLSearchParams(location.search);
+  const invite = params.get('invite');
+
+  const form = document.getElementById('form');
+  const message = document.getElementById('message');
+  const submit = document.getElementById('submit');
+  const emailInput = document.getElementById('email');
+  const passwordInput = document.getElementById('password');
+
+  if (invite) {
+    document.getElementById('subtitle').textContent = 'Set your password to finish setting up';
+    document.getElementById('passwordLabel').textContent = 'CHOOSE A PASSWORD';
+    document.getElementById('nameRow').style.display = 'block';
+    passwordInput.setAttribute('autocomplete', 'new-password');
+    emailInput.parentElement.style.display = 'none';
+    emailInput.required = false;
+    submit.textContent = 'Set password and sign in';
+    document.getElementById('hint').textContent =
+      'At least 10 characters, with a letter and a number. Nobody else ever sees it.';
+  }
+
+  function show(text, kind) {
+    message.textContent = text;
+    message.className = 'message ' + kind;
+  }
+
+  form.addEventListener('submit', async function (event) {
+    event.preventDefault();
+    submit.disabled = true;
+    message.className = 'message';
+
+    try {
+      const url = invite ? '/api/auth/accept' : '/api/auth/login';
+      const body = invite
+        ? { invite: invite, password: passwordInput.value, name: document.getElementById('name').value }
+        : { email: emailInput.value, password: passwordInput.value };
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await response.json().catch(function () { return {}; });
+
+      if (!response.ok) {
+        show(data.error || 'That didn’t work. Try again.', 'error');
+        submit.disabled = false;
+        return;
+      }
+
+      // The website uses the cookie; the token is here for anything else.
+      try { localStorage.setItem('scanner-token', data.token); } catch (e) {}
+      show('Signed in. Taking you to the scanner…', 'ok');
+      location.href = '/';
+    } catch (err) {
+      show('Could not reach the server. Check your connection and try again.', 'error');
+      submit.disabled = false;
+    }
+  });
+})();
+</script>
+</body>
+</html>

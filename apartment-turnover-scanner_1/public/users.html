@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#07354D" />
+<title>People &middot; Serial Number Scanner</title>
+<link rel="icon" type="image/png" href="/favicon.png?v=3" />
+<style>
+  :root { --brand:#07354D; --brand-dark:#052637; --green:#1a9e4f; --silver:#A8B0BC; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:#f4f6f8; color:#0b1f2a;
+         font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif; }
+  .topbar { background:#fff; border-bottom:1px solid #e3e8ee; padding:12px 18px;
+            display:flex; align-items:center; gap:12px; }
+  .topbar img { height:34px; }
+  .topbar .title { font-weight:700; }
+  .topbar a { margin-left:auto; color:var(--brand); font-size:14px; text-decoration:none; font-weight:600; }
+  main { max-width:760px; margin:0 auto; padding:20px 16px 60px; }
+  h2 { font-size:17px; margin:26px 0 10px; }
+  .panel { background:#fff; border:1px solid #e3e8ee; border-radius:12px; overflow:hidden; }
+  .row { display:flex; align-items:center; gap:12px; padding:14px 16px; border-bottom:1px solid #eef1f4; }
+  .row:last-child { border-bottom:none; }
+  .who { flex:1; min-width:0; }
+  .who .name { font-weight:600; }
+  .who .email { color:#6b7783; font-size:13px; word-break:break-all; }
+  .tag { font-size:11px; font-weight:700; letter-spacing:.4px; padding:4px 8px; border-radius:999px; }
+  .tag.admin { background:#e7effa; color:#1c4f86; }
+  .tag.pending { background:#fdf3e2; color:#8a5a12; }
+  .tag.off { background:#f1f2f4; color:#6b7783; }
+  .actions { display:flex; gap:8px; flex-wrap:wrap; }
+  button { font-family:inherit; font-size:13px; font-weight:600; padding:8px 12px;
+           border-radius:8px; border:1px solid #d3dae1; background:#fff; color:#0b1f2a; cursor:pointer; }
+  button.primary { background:var(--green); border-color:var(--green); color:#fff; }
+  button.danger { color:#a11b1b; border-color:#f0c9c9; }
+  form.invite { background:#fff; border:1px solid #e3e8ee; border-radius:12px; padding:16px; }
+  label { display:block; font-size:11px; font-weight:700; letter-spacing:.6px; color:#6b7783; margin:10px 0 5px; }
+  input, select { width:100%; padding:11px; font-size:16px; border:1px solid #d3dae1; border-radius:9px; font-family:inherit; }
+  .invite-grid { display:flex; gap:12px; flex-wrap:wrap; }
+  .invite-grid > div { flex:1; min-width:180px; }
+  .message { margin-top:14px; padding:12px 14px; border-radius:9px; font-size:14px; display:none; }
+  .message.error { display:block; background:#fdecec; color:#a11b1b; }
+  .message.ok { display:block; background:#e8f6ed; color:#15683a; }
+  .message code { display:block; margin-top:8px; word-break:break-all; font-size:12px; }
+  .note { color:#6b7783; font-size:13px; line-height:1.55; }
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <img src="/mark.png?v=3" alt="Carter &amp; Carter" />
+    <div class="title">People</div>
+    <a href="/">&larr; Back to the scanner</a>
+  </div>
+
+  <main>
+    <div id="gate" class="note">Checking your access&hellip;</div>
+
+    <div id="admin" style="display:none">
+      <h2>Invite someone</h2>
+      <form class="invite" id="inviteForm">
+        <div class="invite-grid">
+          <div>
+            <label for="email">EMAIL ADDRESS</label>
+            <input type="email" id="email" required placeholder="name@carter-carter.net" />
+          </div>
+          <div>
+            <label for="name">NAME (OPTIONAL)</label>
+            <input type="text" id="name" />
+          </div>
+          <div>
+            <label for="role">ACCESS</label>
+            <select id="role">
+              <option value="member">Can scan</option>
+              <option value="admin">Administrator</option>
+            </select>
+          </div>
+        </div>
+        <button class="primary" type="submit" id="inviteButton" style="margin-top:16px;width:auto;padding:12px 20px">Send invite</button>
+        <div class="message" id="inviteMessage"></div>
+        <p class="note" style="margin-bottom:0">
+          Administrators can invite and remove people. Everyone else can scan and see the projects.
+        </p>
+      </form>
+
+      <h2>Everyone with access</h2>
+      <div class="panel" id="list"></div>
+    </div>
+  </main>
+
+<script>
+(function () {
+  const gate = document.getElementById('gate');
+  const adminPane = document.getElementById('admin');
+  const list = document.getElementById('list');
+  const inviteMessage = document.getElementById('inviteMessage');
+  let me = null;
+
+  function show(el, text, kind) {
+    el.textContent = text;
+    el.className = 'message ' + kind;
+  }
+
+  async function api(url, options) {
+    const opts = options || {};
+    opts.headers = Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {});
+    const token = (function () { try { return localStorage.getItem('scanner-token'); } catch (e) { return null; } })();
+    if (token) opts.headers.Authorization = 'Bearer ' + token;
+    const response = await fetch(url, opts);
+    if (response.status === 401) { location.href = '/login.html'; throw new Error('signed out'); }
+    const data = await response.json().catch(function () { return {}; });
+    if (!response.ok) throw new Error(data.error || 'Something went wrong');
+    return data;
+  }
+
+  function personRow(user) {
+    const row = document.createElement('div');
+    row.className = 'row';
+
+    const who = document.createElement('div');
+    who.className = 'who';
+    const name = document.createElement('div');
+    name.className = 'name';
+    name.textContent = user.name || user.email.split('@')[0];
+    const email = document.createElement('div');
+    email.className = 'email';
+    email.textContent = user.email;
+    who.appendChild(name);
+    who.appendChild(email);
+    row.appendChild(who);
+
+    if (user.role === 'admin') {
+      const tag = document.createElement('span');
+      tag.className = 'tag admin';
+      tag.textContent = 'ADMIN';
+      row.appendChild(tag);
+    }
+    if (user.pending) {
+      const tag = document.createElement('span');
+      tag.className = 'tag pending';
+      tag.textContent = 'INVITE SENT';
+      row.appendChild(tag);
+    }
+    if (user.disabled_at) {
+      const tag = document.createElement('span');
+      tag.className = 'tag off';
+      tag.textContent = 'NO ACCESS';
+      row.appendChild(tag);
+    }
+
+    const actions = document.createElement('div');
+    actions.className = 'actions';
+
+    if (user.id !== me.id) {
+      const toggleRole = document.createElement('button');
+      toggleRole.textContent = user.role === 'admin' ? 'Make scanner' : 'Make admin';
+      toggleRole.onclick = async function () {
+        try {
+          await api('/api/users/' + user.id, {
+            method: 'PATCH',
+            body: JSON.stringify({ role: user.role === 'admin' ? 'member' : 'admin' }),
+          });
+          load();
+        } catch (e) { alert(e.message); }
+      };
+      actions.appendChild(toggleRole);
+
+      const remove = document.createElement('button');
+      remove.className = 'danger';
+      remove.textContent = user.disabled_at ? 'Restore' : 'Remove access';
+      remove.onclick = async function () {
+        if (!user.disabled_at && !confirm('Remove access for ' + user.email + '?')) return;
+        try {
+          await api('/api/users/' + user.id, {
+            method: 'PATCH',
+            body: JSON.stringify({ disabled: !user.disabled_at }),
+          });
+          load();
+        } catch (e) { alert(e.message); }
+      };
+      actions.appendChild(remove);
+    }
+
+    row.appendChild(actions);
+    return row;
+  }
+
+  async function load() {
+    const data = await api('/api/users');
+    list.innerHTML = '';
+    data.users.forEach(function (user) { list.appendChild(personRow(user)); });
+  }
+
+  document.getElementById('inviteForm').addEventListener('submit', async function (event) {
+    event.preventDefault();
+    const button = document.getElementById('inviteButton');
+    button.disabled = true;
+    inviteMessage.className = 'message';
+    try {
+      const result = await api('/api/users', {
+        method: 'POST',
+        body: JSON.stringify({
+          email: document.getElementById('email').value,
+          name: document.getElementById('name').value,
+          role: document.getElementById('role').value,
+        }),
+      });
+      if (result.emailed) {
+        show(inviteMessage, 'Invite emailed. It expires in 14 days.', 'ok');
+      } else {
+        inviteMessage.className = 'message ok';
+        inviteMessage.textContent = 'Account created, but the email didn’t send'
+          + (result.emailError ? ' (' + result.emailError + ')' : '')
+          + '. Send them this link yourself:';
+        const code = document.createElement('code');
+        code.textContent = result.link;
+        inviteMessage.appendChild(code);
+      }
+      document.getElementById('email').value = '';
+      document.getElementById('name').value = '';
+      load();
+    } catch (e) {
+      show(inviteMessage, e.message, 'error');
+    }
+    button.disabled = false;
+  });
+
+  (async function start() {
+    try {
+      const status = await api('/api/auth/status');
+      me = status.user;
+      if (!me) { location.href = '/login.html'; return; }
+      if (me.role !== 'admin') {
+        gate.textContent = 'Only administrators can manage people. Ask Andrew if you need access.';
+        return;
+      }
+      gate.style.display = 'none';
+      adminPane.style.display = 'block';
+      load();
+    } catch (e) {
+      gate.textContent = 'Could not load this page: ' + e.message;
+    }
+  })();
+})();
+</script>
+</body>
+</html>

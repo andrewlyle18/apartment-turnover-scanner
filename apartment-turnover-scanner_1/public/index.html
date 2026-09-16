@@ -7,19 +7,56 @@
 <title>Serial Number Scanner &middot; Carter &amp; Carter</title>
 <link rel="icon" type="image/png" href="/favicon.png?v=3" />
 <link rel="apple-touch-icon" href="/favicon.png?v=3" />
-<link rel="stylesheet" href="/styles.css?v=20" />
+<link rel="stylesheet" href="/styles.css?v=21" />
 </head>
 <body>
 <div id="app">
   <header class="topbar">
     <img class="topbar-logo" src="/mark.png?v=3" alt="Carter &amp; Carter" />
     <div class="topbar-title">Serial Number Scanner</div>
+    <div class="topbar-account" id="topbarAccount"></div>
   </header>
 
   <main id="view-root"></main>
 </div>
 
+<script>
+// Who's signed in — and, once sign-in is switched on, keeping strangers out.
+// Runs before the app so a locked-out visitor never sees a flash of the data.
+(function () {
+  fetch('/api/auth/status', { credentials: 'same-origin' })
+    .then(function (r) { return r.json(); })
+    .then(function (status) {
+      if (status.enforced && !status.user) {
+        location.href = '/login.html';
+        return;
+      }
+      var slot = document.getElementById('topbarAccount');
+      if (!slot || !status.user) return;
+
+      if (status.user.role === 'admin') {
+        var people = document.createElement('a');
+        people.href = '/users.html';
+        people.textContent = 'People';
+        slot.appendChild(people);
+      }
+      var out = document.createElement('a');
+      out.href = '#';
+      out.textContent = 'Sign out';
+      out.onclick = function (e) {
+        e.preventDefault();
+        fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' })
+          .then(function () {
+            try { localStorage.removeItem('scanner-token'); } catch (err) {}
+            location.href = '/login.html';
+          });
+      };
+      slot.appendChild(out);
+    })
+    .catch(function () { /* offline: let the app carry on with what it has */ });
+})();
+</script>
 <script src="https://unpkg.com/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
-<script src="/app.js?v=20"></script>
+<script src="/app.js?v=21"></script>
 </body>
 </html>

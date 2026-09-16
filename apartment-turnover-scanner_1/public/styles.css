@@ -452,3 +452,20 @@ input[type="text"], input[type="file"] {
   text-align: left;
 }
 .model-hint:active { background: rgba(255,255,255,0.2); }
+
+/* Account links in the top bar — quiet, right-aligned, out of the way of the
+   logo and the job at hand. */
+.topbar-account {
+  margin-left: auto;
+  display: flex;
+  gap: 14px;
+  align-items: center;
+}
+.topbar-account a {
+  color: var(--brand);
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.topbar-account a:active { opacity: 0.6; }
