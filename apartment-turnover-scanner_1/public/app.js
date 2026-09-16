@@ -2301,6 +2301,15 @@
         `}
       </div>
 
+      <div class="card danger-zone">
+        <div class="row between">
+          <div>
+            <strong>Delete this commitment</strong>
+            <div class="help">Its schedule of values, change orders and applications go with it. Once an application has been approved it can only be archived.</div>
+          </div>
+          <button class="danger-quiet" id="deleteCommitment">Delete&hellip;</button>
+        </div>
+      </div>
       `}
 
       ${tab !== 'changes' ? '' : `
@@ -2345,6 +2354,36 @@
       </div>
       `}
     `;
+
+    const deleteCommitment = document.getElementById('deleteCommitment');
+    if (deleteCommitment) deleteCommitment.addEventListener('click', async () => {
+      const typed = await showPrompt(
+        `Delete the commitment with ${c.sub_company}? Type the subcontractor's name to confirm.`,
+        '', 'Delete commitment');
+      if (!typed) return;
+      try {
+        await api(`/api/commitments/${commitmentId}`, {
+          method: 'DELETE',
+          body: JSON.stringify({ confirmName: typed }),
+        });
+        toast('Commitment deleted');
+        navigate(`/project/${projectId}/commitments`);
+      } catch (e) {
+        // Approved applications can't be deleted — offer the honest alternative.
+        if (/archive/i.test(e.message)) {
+          const archive = await showConfirm(`${e.message}\n\nArchive it now?`, 'Archive');
+          if (archive) {
+            try {
+              await api(`/api/commitments/${commitmentId}`, { method: 'PATCH', body: JSON.stringify({ archived: true }) });
+              toast('Commitment archived');
+              navigate(`/project/${projectId}/commitments`);
+            } catch (err) { toast(err.message); }
+          }
+          return;
+        }
+        toast(e.message);
+      }
+    });
 
     root.querySelectorAll('.tab').forEach((button) => {
       button.addEventListener('click', () => {
@@ -2640,11 +2679,14 @@
           <div class="row" style="margin-top:10px;"><button class="secondary" id="saveProjectAddress">Save project address</button></div>
           <p class="help">The change order document prints the job's address. Set it once and every document after this has it.</p>
         ` : ''}
-        <div class="row" style="margin-top:16px; gap:8px;">
-          ${locked
-            ? `<button class="secondary" id="unapprove">Un-approve</button>
-               <span class="help">Approved ${co.approved_at ? new Date(co.approved_at).toLocaleDateString() : ''} &mdash; it's in the schedule of values and can be billed.</span>`
-            : `<button class="go-btn" id="approve">Approve &mdash; adds it to the schedule of values</button>`}
+        <div class="row between" style="margin-top:16px; gap:8px;">
+          <span class="row" style="gap:8px;">
+            ${locked
+              ? `<button class="secondary" id="unapprove">Un-approve</button>
+                 <span class="help">Approved ${co.approved_at ? new Date(co.approved_at).toLocaleDateString() : ''} &mdash; it's in the schedule of values and can be billed.</span>`
+              : `<button class="go-btn" id="approve">Approve &mdash; adds it to the schedule of values</button>`}
+          </span>
+          <button class="danger-quiet" id="deleteCo">Delete change order&hellip;</button>
         </div>
       </div>
     `;
@@ -2777,6 +2819,18 @@
       try {
         await api(`/api/change-orders/${changeOrderId}`, { method: 'PATCH', body: JSON.stringify({ status: 'pending' }) });
         renderChangeOrder(projectId, commitmentId, changeOrderId);
+      } catch (e) { toast(e.message); }
+    });
+
+    document.getElementById('deleteCo').addEventListener('click', async () => {
+      const ok = await showConfirm(
+        `Delete ${co.number} (${money(s.thisChangeOrder)})? Its line items and attachments go with it. This can't be undone.`,
+        'Delete');
+      if (!ok) return;
+      try {
+        await api(`/api/change-orders/${changeOrderId}`, { method: 'DELETE' });
+        toast('Change order deleted');
+        navigate(`/project/${projectId}/commitment/${commitmentId}/changes`);
       } catch (e) { toast(e.message); }
     });
   }

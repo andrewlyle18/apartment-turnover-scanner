@@ -577,3 +577,5 @@ button.danger-quiet {
   font-family: inherit; font-size: 14px; font-weight: 600; border-radius: 8px; cursor: pointer;
 }
 button.danger-quiet:hover { background: #fdf5f5; }
+.danger-zone { border-color: #f0dede; background: #fffbfb; }
+.danger-zone .help { max-width: 560px; margin-top: 3px; }
