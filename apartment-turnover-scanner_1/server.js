@@ -4,6 +4,8 @@ const path = require('path');
 const XLSX = require('xlsx');
 const { pool, initSchema } = require('./db');
 const { initAuth, attachUser, requireAuth, adminOnly, mountAuthRoutes, ENFORCED } = require('./auth');
+const { initBilling } = require('./billing');
+const { mountBillingRoutes } = require('./billing-routes');
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
@@ -30,9 +32,16 @@ mountAuthRoutes(app);
 // them, so a route added later can't accidentally be left open.
 app.use('/api', (req, res, next) => {
   if (!ENFORCED()) return next();
-  if (req.path.startsWith('/auth/') || req.path === '/health') return next();
+  // /bill/ is the subcontractor's own page: the token in their link is the
+  // credential, and it reaches exactly one pay application. They have no
+  // account here and never will.
+  if (req.path.startsWith('/auth/') || req.path.startsWith('/bill/') || req.path === '/health') return next();
   return requireAuth(req, res, next);
 });
+
+// Commitments, change orders and pay applications. Administrators only,
+// apart from the token routes inside.
+mountBillingRoutes(app, { adminOnly });
 
 // ---------- Projects ----------
 async function loadProjectsWithStats(whereClause) {
@@ -684,6 +693,7 @@ const PORT = process.env.PORT || 3000;
 
 initSchema()
   .then(() => initAuth())
+  .then(() => initBilling())
   .then(() => {
     console.log(`[auth] Sign-in enforcement is ${ENFORCED() ? 'ON' : 'OFF'}`);
     app.listen(PORT, () => console.log(`Appliance scanner listening on :${PORT}`));

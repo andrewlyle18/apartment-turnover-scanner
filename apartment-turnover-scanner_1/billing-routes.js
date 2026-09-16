@@ -1,0 +1,578 @@
+const { pool } = require('./db');
+const {
+  applicationView,
+  previousCertificatesFor,
+  computePayApp,
+  loadApplication,
+  newToken,
+  toCents,
+} = require('./billing');
+
+// Admin-only, except the token routes at the bottom, which are what a
+// subcontractor opens from a link with no account at all.
+
+const trim = (v) => String(v === undefined || v === null ? '' : v).trim();
+const numberOrNull = (v) => (v === '' || v === null || v === undefined ? null : Number(v));
+
+function mountBillingRoutes(app, { adminOnly }) {
+  // ---------- Commitments ----------
+
+  app.get('/api/commitments', adminOnly, async (req, res) => {
+    const projectId = parseInt(req.query.projectId, 10);
+    if (!projectId) return res.status(400).json({ error: 'projectId is required' });
+
+    const commitments = await pool.query(
+      `SELECT c.*,
+              COALESCE(base.total, 0) AS base_total,
+              COALESCE(co.total, 0) AS co_total,
+              COALESCE(apps.n, 0) AS pay_app_count
+       FROM commitments c
+       LEFT JOIN (
+         SELECT commitment_id, SUM(scheduled_value) AS total
+         FROM sov_lines WHERE source = 'base' GROUP BY commitment_id
+       ) base ON base.commitment_id = c.id
+       LEFT JOIN (
+         SELECT commitment_id, SUM(scheduled_value) AS total
+         FROM sov_lines WHERE source = 'co' GROUP BY commitment_id
+       ) co ON co.commitment_id = c.id
+       LEFT JOIN (
+         SELECT commitment_id, COUNT(*)::int AS n FROM pay_apps GROUP BY commitment_id
+       ) apps ON apps.commitment_id = c.id
+       WHERE c.project_id = $1 AND c.archived_at IS NULL
+       ORDER BY c.sub_company, c.id`,
+      [projectId]
+    );
+    res.json({ commitments: commitments.rows });
+  });
+
+  app.post('/api/commitments', adminOnly, async (req, res) => {
+    const b = req.body || {};
+    const projectId = parseInt(b.projectId, 10);
+    if (!projectId) return res.status(400).json({ error: 'projectId is required' });
+    if (!trim(b.subCompany)) return res.status(400).json({ error: "The subcontractor's company name is required" });
+
+    const result = await pool.query(
+      `INSERT INTO commitments
+        (project_id, number, title, sub_company, sub_address1, sub_address2, sub_email,
+         contract_date, retainage_pct, materials_retainage_pct)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+       RETURNING *`,
+      [
+        projectId,
+        trim(b.number) || null,
+        trim(b.title) || 'Subcontract',
+        trim(b.subCompany),
+        trim(b.subAddress1) || null,
+        trim(b.subAddress2) || null,
+        trim(b.subEmail) || null,
+        b.contractDate || null,
+        b.retainagePct === undefined ? 0.10 : Number(b.retainagePct),
+        b.materialsRetainagePct === undefined ? 0 : Number(b.materialsRetainagePct),
+      ]
+    );
+    res.json({ commitment: result.rows[0] });
+  });
+
+  app.get('/api/commitments/:id', adminOnly, async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    const commitment = await pool.query('SELECT * FROM commitments WHERE id = $1', [id]);
+    if (!commitment.rows.length) return res.status(404).json({ error: 'Commitment not found' });
+
+    const sov = await pool.query(
+      `SELECT * FROM sov_lines WHERE commitment_id = $1 ORDER BY source, sort_order, id`, [id]
+    );
+    const changeOrders = await pool.query(
+      `SELECT * FROM change_orders WHERE commitment_id = $1 ORDER BY id`, [id]
+    );
+    const payApps = await pool.query(
+      `SELECT id, number, invoice_no, period_start, period_end, status, submitted_at,
+              approved_at, (token IS NOT NULL) AS has_link, token_expires
+       FROM pay_apps WHERE commitment_id = $1 ORDER BY number DESC`, [id]
+    );
+    res.json({
+      commitment: commitment.rows[0],
+      sovLines: sov.rows,
+      changeOrders: changeOrders.rows,
+      payApps: payApps.rows,
+    });
+  });
+
+  app.patch('/api/commitments/:id', adminOnly, async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    const b = req.body || {};
+    const fields = [];
+    const values = [];
+    let i = 1;
+    const set = (column, value) => { fields.push(`${column} = $${i++}`); values.push(value); };
+
+    if (b.number !== undefined) set('number', trim(b.number) || null);
+    if (b.title !== undefined) set('title', trim(b.title));
+    if (b.subCompany !== undefined) set('sub_company', trim(b.subCompany));
+    if (b.subAddress1 !== undefined) set('sub_address1', trim(b.subAddress1) || null);
+    if (b.subAddress2 !== undefined) set('sub_address2', trim(b.subAddress2) || null);
+    if (b.subEmail !== undefined) set('sub_email', trim(b.subEmail) || null);
+    if (b.contractDate !== undefined) set('contract_date', b.contractDate || null);
+    if (b.retainagePct !== undefined) set('retainage_pct', Number(b.retainagePct));
+    if (b.materialsRetainagePct !== undefined) set('materials_retainage_pct', Number(b.materialsRetainagePct));
+    if (b.archived !== undefined) set('archived_at', b.archived ? new Date() : null);
+    if (!fields.length) return res.status(400).json({ error: 'Nothing to update' });
+
+    values.push(id);
+    const result = await pool.query(
+      `UPDATE commitments SET ${fields.join(', ')} WHERE id = $${i} RETURNING *`, values
+    );
+    if (!result.rows.length) return res.status(404).json({ error: 'Commitment not found' });
+    res.json({ commitment: result.rows[0] });
+  });
+
+  // ---------- Schedule of values ----------
+  // Replaces the base schedule wholesale. Change-order lines are left alone,
+  // and a line that is already billed on an open or approved application
+  // cannot be pulled out from under it.
+
+  app.put('/api/commitments/:id/sov', adminOnly, async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    const rows = Array.isArray(req.body && req.body.lines) ? req.body.lines : null;
+    if (!rows) return res.status(400).json({ error: 'lines are required' });
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const billed = await client.query(
+        `SELECT COUNT(*)::int AS n
+         FROM pay_app_lines l
+         JOIN sov_lines s ON s.id = l.sov_line_id
+         WHERE s.commitment_id = $1 AND s.source = 'base'`,
+        [id]
+      );
+      if (billed.rows[0].n > 0) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'This schedule of values is already being billed. Add a change order instead of replacing it.',
+        });
+      }
+
+      await client.query(`DELETE FROM sov_lines WHERE commitment_id = $1 AND source = 'base'`, [id]);
+      let order = 0;
+      for (const row of rows) {
+        const description = trim(row.description);
+        if (!description) continue;
+        await client.query(
+          `INSERT INTO sov_lines (commitment_id, item_no, description, scheduled_value, sort_order, source, retainage_pct)
+           VALUES ($1,$2,$3,$4,$5,'base',$6)`,
+          [id, trim(row.itemNo) || null, description, Number(row.scheduledValue || 0), order++, numberOrNull(row.retainagePct)]
+        );
+      }
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    const sov = await pool.query(
+      `SELECT * FROM sov_lines WHERE commitment_id = $1 ORDER BY source, sort_order, id`, [id]
+    );
+    res.json({ sovLines: sov.rows });
+  });
+
+  // ---------- Change orders ----------
+
+  app.post('/api/commitments/:id/change-orders', adminOnly, async (req, res) => {
+    const commitmentId = parseInt(req.params.id, 10);
+    const b = req.body || {};
+    if (!trim(b.title)) return res.status(400).json({ error: 'A title is required' });
+
+    const next = await pool.query(
+      `SELECT COALESCE(MAX(NULLIF(regexp_replace(number, '\\D', '', 'g'), '')::int), 0) + 1 AS n
+       FROM change_orders WHERE commitment_id = $1`,
+      [commitmentId]
+    );
+    const number = trim(b.number) || `CO #${String(next.rows[0].n).padStart(2, '0')}`;
+
+    const result = await pool.query(
+      `INSERT INTO change_orders
+        (commitment_id, number, title, description, reason, location, amount, retainage_pct, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+      [
+        commitmentId, number, trim(b.title), trim(b.description) || null, trim(b.reason) || null,
+        trim(b.location) || null, Number(b.amount || 0), numberOrNull(b.retainagePct),
+        req.user ? (req.user.name || req.user.email) : null,
+      ]
+    );
+    res.json({ changeOrder: result.rows[0] });
+  });
+
+  app.patch('/api/change-orders/:id', adminOnly, async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    const b = req.body || {};
+    const existing = await pool.query('SELECT * FROM change_orders WHERE id = $1', [id]);
+    if (!existing.rows.length) return res.status(404).json({ error: 'Change order not found' });
+    const co = existing.rows[0];
+
+    if (b.status && !['pending', 'approved', 'rejected'].includes(b.status)) {
+      return res.status(400).json({ error: 'Unknown status' });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      const fields = [];
+      const values = [];
+      let i = 1;
+      const set = (column, value) => { fields.push(`${column} = $${i++}`); values.push(value); };
+      if (b.title !== undefined) set('title', trim(b.title));
+      if (b.description !== undefined) set('description', trim(b.description) || null);
+      if (b.reason !== undefined) set('reason', trim(b.reason) || null);
+      if (b.location !== undefined) set('location', trim(b.location) || null);
+      if (b.amount !== undefined) set('amount', Number(b.amount));
+      if (b.retainagePct !== undefined) set('retainage_pct', numberOrNull(b.retainagePct));
+      if (b.status !== undefined) {
+        set('status', b.status);
+        set('approved_at', b.status === 'approved' ? new Date() : null);
+        set('approved_by', b.status === 'approved' && req.user ? (req.user.name || req.user.email) : null);
+      }
+      if (fields.length) {
+        values.push(id);
+        await client.query(`UPDATE change_orders SET ${fields.join(', ')} WHERE id = $${i}`, values);
+      }
+
+      const after = await client.query('SELECT * FROM change_orders WHERE id = $1', [id]);
+      const updated = after.rows[0];
+
+      // An approved change order is a line in the schedule of values. That is
+      // the whole point — it bills like everything else.
+      if (updated.status === 'approved') {
+        const line = await client.query('SELECT id FROM sov_lines WHERE change_order_id = $1', [id]);
+        const label = `${updated.number} - ${updated.title}`;
+        if (line.rows.length) {
+          await client.query(
+            `UPDATE sov_lines SET description = $1, scheduled_value = $2, retainage_pct = $3 WHERE id = $4`,
+            [label, updated.amount, updated.retainage_pct, line.rows[0].id]
+          );
+        } else {
+          const order = await client.query(
+            `SELECT COALESCE(MAX(sort_order), 0) + 1 AS n FROM sov_lines WHERE commitment_id = $1 AND source = 'co'`,
+            [co.commitment_id]
+          );
+          const inserted = await client.query(
+            `INSERT INTO sov_lines (commitment_id, item_no, description, scheduled_value, sort_order, source, change_order_id, retainage_pct)
+             VALUES ($1,$2,$3,$4,$5,'co',$6,$7) RETURNING id`,
+            [co.commitment_id, null, label, updated.amount, order.rows[0].n, id, updated.retainage_pct]
+          );
+          // Any application still open picks the new line up straight away,
+          // so an approved CO can be billed in the current period.
+          await client.query(
+            `INSERT INTO pay_app_lines (pay_app_id, sov_line_id, previous_completed)
+             SELECT p.id, $1, 0 FROM pay_apps p
+             WHERE p.commitment_id = $2 AND p.status = 'open'
+             ON CONFLICT DO NOTHING`,
+            [inserted.rows[0].id, co.commitment_id]
+          );
+        }
+      } else {
+        // Un-approving only works while nothing has billed against it.
+        const billed = await client.query(
+          `SELECT COUNT(*)::int AS n FROM pay_app_lines l
+           JOIN sov_lines s ON s.id = l.sov_line_id
+           WHERE s.change_order_id = $1 AND (l.this_period <> 0 OR l.previous_completed <> 0)`,
+          [id]
+        );
+        if (billed.rows[0].n > 0) {
+          await client.query('ROLLBACK');
+          return res.status(409).json({ error: 'This change order has already been billed and cannot be un-approved.' });
+        }
+        await client.query('DELETE FROM sov_lines WHERE change_order_id = $1', [id]);
+      }
+
+      await client.query('COMMIT');
+      res.json({ changeOrder: updated });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  });
+
+  // ---------- Pay applications ----------
+
+  app.post('/api/commitments/:id/pay-apps', adminOnly, async (req, res) => {
+    const commitmentId = parseInt(req.params.id, 10);
+    const b = req.body || {};
+
+    const commitment = await pool.query('SELECT * FROM commitments WHERE id = $1', [commitmentId]);
+    if (!commitment.rows.length) return res.status(404).json({ error: 'Commitment not found' });
+
+    const open = await pool.query(
+      `SELECT id, number FROM pay_apps WHERE commitment_id = $1 AND status <> 'approved' ORDER BY number DESC LIMIT 1`,
+      [commitmentId]
+    );
+    if (open.rows.length) {
+      return res.status(409).json({
+        error: `Application #${open.rows[0].number} is still open. Approve or delete it before starting another.`,
+      });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const next = await client.query(
+        'SELECT COALESCE(MAX(number), 0) + 1 AS n FROM pay_apps WHERE commitment_id = $1', [commitmentId]
+      );
+      const number = next.rows[0].n;
+      const token = newToken();
+
+      const created = await client.query(
+        `INSERT INTO pay_apps (commitment_id, number, invoice_no, period_start, period_end, application_date, token, token_expires)
+         VALUES ($1,$2,$3,$4,$5,$6,$7, now() + interval '60 days') RETURNING *`,
+        [
+          commitmentId, number, trim(b.invoiceNo) || null,
+          b.periodStart || null, b.periodEnd || null, b.applicationDate || null, token,
+        ]
+      );
+      const payApp = created.rows[0];
+
+      // Previous completed comes from the last approved application, per line.
+      // Nobody types it, so it cannot disagree with last month.
+      await client.query(
+        `INSERT INTO pay_app_lines (pay_app_id, sov_line_id, previous_completed)
+         SELECT $1, s.id, COALESCE(prior.total, 0)
+         FROM sov_lines s
+         LEFT JOIN (
+           SELECT l.sov_line_id,
+                  l.previous_completed + l.this_period + l.materials_stored AS total
+           FROM pay_app_lines l
+           JOIN pay_apps p ON p.id = l.pay_app_id
+           WHERE p.commitment_id = $2 AND p.status = 'approved'
+             AND p.number = (SELECT MAX(number) FROM pay_apps WHERE commitment_id = $2 AND status = 'approved')
+         ) prior ON prior.sov_line_id = s.id
+         WHERE s.commitment_id = $2`,
+        [payApp.id, commitmentId]
+      );
+
+      await client.query('COMMIT');
+      res.json({ payApp, link: `/bill.html?t=${token}` });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  });
+
+  app.get('/api/pay-apps/:id', adminOnly, async (req, res) => {
+    const view = await applicationView(parseInt(req.params.id, 10));
+    if (!view) return res.status(404).json({ error: 'Application not found' });
+    res.json({
+      ...view,
+      link: view.payApp.token ? `/bill.html?t=${view.payApp.token}` : null,
+    });
+  });
+
+  // Adjusting a line from the admin side. The sub's own figure is kept.
+  app.patch('/api/pay-apps/:id/lines/:lineId', adminOnly, async (req, res) => {
+    const payAppId = parseInt(req.params.id, 10);
+    const lineId = parseInt(req.params.lineId, 10);
+    const b = req.body || {};
+
+    const app_ = await pool.query('SELECT status FROM pay_apps WHERE id = $1', [payAppId]);
+    if (!app_.rows.length) return res.status(404).json({ error: 'Application not found' });
+    if (app_.rows[0].status === 'approved') {
+      return res.status(409).json({ error: 'This application is approved. Reopen it before changing any figures.' });
+    }
+
+    const fields = [];
+    const values = [];
+    let i = 1;
+    if (b.thisPeriod !== undefined) { fields.push(`this_period = $${i++}`); values.push(Number(b.thisPeriod)); }
+    if (b.materialsStored !== undefined) { fields.push(`materials_stored = $${i++}`); values.push(Number(b.materialsStored)); }
+    if (!fields.length) return res.status(400).json({ error: 'Nothing to update' });
+    fields.push(`edited_by = $${i++}`); values.push(req.user ? (req.user.name || req.user.email) : 'admin');
+    fields.push(`edited_at = now()`);
+
+    values.push(lineId, payAppId);
+    await pool.query(
+      `UPDATE pay_app_lines SET ${fields.join(', ')} WHERE id = $${i++} AND pay_app_id = $${i}`, values
+    );
+    res.json(await applicationView(payAppId));
+  });
+
+  app.patch('/api/pay-apps/:id', adminOnly, async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    const b = req.body || {};
+    const existing = await pool.query('SELECT * FROM pay_apps WHERE id = $1', [id]);
+    if (!existing.rows.length) return res.status(404).json({ error: 'Application not found' });
+
+    const fields = [];
+    const values = [];
+    let i = 1;
+    const set = (column, value) => { fields.push(`${column} = $${i++}`); values.push(value); };
+
+    if (b.invoiceNo !== undefined) set('invoice_no', trim(b.invoiceNo) || null);
+    if (b.periodStart !== undefined) set('period_start', b.periodStart || null);
+    if (b.periodEnd !== undefined) set('period_end', b.periodEnd || null);
+    if (b.applicationDate !== undefined) set('application_date', b.applicationDate || null);
+    if (b.note !== undefined) set('note', trim(b.note) || null);
+
+    if (b.status !== undefined) {
+      if (!['open', 'submitted', 'approved'].includes(b.status)) {
+        return res.status(400).json({ error: 'Unknown status' });
+      }
+      set('status', b.status);
+      if (b.status === 'approved') {
+        set('approved_at', new Date());
+        set('approved_by', req.user ? (req.user.name || req.user.email) : 'admin');
+      } else {
+        set('approved_at', null);
+        set('approved_by', null);
+      }
+    }
+    if (b.reissueLink === true) {
+      set('token', newToken());
+      fields.push(`token_expires = now() + interval '60 days'`);
+    }
+    if (b.revokeLink === true) set('token', null);
+    if (!fields.length) return res.status(400).json({ error: 'Nothing to update' });
+
+    values.push(id);
+    await pool.query(`UPDATE pay_apps SET ${fields.join(', ')} WHERE id = $${i}`, values);
+    res.json(await applicationView(id));
+  });
+
+  app.delete('/api/pay-apps/:id', adminOnly, async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    const row = await pool.query('SELECT status FROM pay_apps WHERE id = $1', [id]);
+    if (!row.rows.length) return res.status(404).json({ error: 'Application not found' });
+    if (row.rows[0].status === 'approved') {
+      return res.status(409).json({ error: 'An approved application cannot be deleted.' });
+    }
+    await pool.query('DELETE FROM pay_apps WHERE id = $1', [id]);
+    res.json({ ok: true });
+  });
+
+  // ---------- The subcontractor's page ----------
+  // No account, no sign-in. The token in the link is the only thing that
+  // grants access, and it grants access to exactly one application.
+
+  async function byToken(token) {
+    const row = await pool.query(
+      `SELECT id FROM pay_apps WHERE token = $1 AND (token_expires IS NULL OR token_expires > now())`,
+      [String(token || '')]
+    );
+    return row.rows.length ? row.rows[0].id : null;
+  }
+
+  function subView(view) {
+    // Deliberately narrow: the sub sees their own application and nothing
+    // else about the job.
+    return {
+      commitment: {
+        number: view.commitment.number,
+        title: view.commitment.title,
+        subCompany: view.commitment.sub_company,
+        subAddress1: view.commitment.sub_address1,
+        subAddress2: view.commitment.sub_address2,
+        contractorName: view.commitment.contractor_name,
+        contractorAddress1: view.commitment.contractor_address1,
+        contractorAddress2: view.commitment.contractor_address2,
+        retainagePct: Number(view.commitment.retainage_pct),
+      },
+      payApp: {
+        id: view.payApp.id,
+        number: view.payApp.number,
+        invoiceNo: view.payApp.invoice_no,
+        periodStart: view.payApp.period_start,
+        periodEnd: view.payApp.period_end,
+        applicationDate: view.payApp.application_date,
+        status: view.payApp.status,
+        signerName: view.payApp.signer_name,
+        signerTitle: view.payApp.signer_title,
+        submittedAt: view.payApp.submitted_at,
+        note: view.payApp.note,
+      },
+      lines: view.lines,
+      base: view.base,
+      changeOrders: view.changeOrders,
+      grand: view.grand,
+      summary: view.summary,
+    };
+  }
+
+  app.get('/api/bill/:token', async (req, res) => {
+    const id = await byToken(req.params.token);
+    if (!id) return res.status(404).json({ error: 'This link is no longer valid. Ask for a new one.' });
+    res.json(subView(await applicationView(id)));
+  });
+
+  app.patch('/api/bill/:token', async (req, res) => {
+    const id = await byToken(req.params.token);
+    if (!id) return res.status(404).json({ error: 'This link is no longer valid. Ask for a new one.' });
+
+    const current = await pool.query('SELECT status FROM pay_apps WHERE id = $1', [id]);
+    if (current.rows[0].status !== 'open') {
+      return res.status(409).json({ error: 'This application has been submitted. Ask for it to be reopened if something needs changing.' });
+    }
+
+    const lines = Array.isArray(req.body && req.body.lines) ? req.body.lines : [];
+    for (const line of lines) {
+      const lineId = parseInt(line.id, 10);
+      if (!lineId) continue;
+      // A line can never bill more than its scheduled value, and never a
+      // negative amount. Caught here rather than three documents later.
+      const row = await pool.query(
+        `SELECT l.previous_completed, s.scheduled_value
+         FROM pay_app_lines l JOIN sov_lines s ON s.id = l.sov_line_id
+         WHERE l.id = $1 AND l.pay_app_id = $2`,
+        [lineId, id]
+      );
+      if (!row.rows.length) continue;
+      const scheduled = toCents(row.rows[0].scheduled_value);
+      const previous = toCents(row.rows[0].previous_completed);
+      let thisPeriod = Math.max(0, toCents(line.thisPeriod));
+      let stored = Math.max(0, toCents(line.materialsStored));
+      if (previous + thisPeriod + stored > scheduled) {
+        thisPeriod = Math.max(0, scheduled - previous - stored);
+      }
+      await pool.query(
+        `UPDATE pay_app_lines SET this_period = $1, materials_stored = $2 WHERE id = $3 AND pay_app_id = $4`,
+        [thisPeriod / 100, stored / 100, lineId, id]
+      );
+    }
+    res.json(subView(await applicationView(id)));
+  });
+
+  app.post('/api/bill/:token/submit', async (req, res) => {
+    const id = await byToken(req.params.token);
+    if (!id) return res.status(404).json({ error: 'This link is no longer valid. Ask for a new one.' });
+
+    const b = req.body || {};
+    if (!trim(b.signerName)) return res.status(400).json({ error: 'Please type your name to sign this application.' });
+
+    const current = await pool.query('SELECT status FROM pay_apps WHERE id = $1', [id]);
+    if (current.rows[0].status !== 'open') {
+      return res.status(409).json({ error: 'This application has already been submitted.' });
+    }
+
+    // Keep what the sub sent, so an admin adjustment later is visible as one.
+    await pool.query(
+      `UPDATE pay_app_lines
+       SET submitted_this_period = this_period, submitted_materials_stored = materials_stored
+       WHERE pay_app_id = $1`,
+      [id]
+    );
+    await pool.query(
+      `UPDATE pay_apps
+       SET status = 'submitted', signer_name = $1, signer_title = $2,
+           submitted_at = now(), submitted_ip = $3,
+           application_date = COALESCE(application_date, CURRENT_DATE)
+       WHERE id = $4`,
+      [trim(b.signerName), trim(b.signerTitle) || null, req.ip || null, id]
+    );
+    res.json(subView(await applicationView(id)));
+  });
+}
+
+module.exports = { mountBillingRoutes };
