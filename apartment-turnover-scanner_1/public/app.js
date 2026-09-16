@@ -1,8 +1,13 @@
 (() => {
   const root = document.getElementById('view-root');
 
+  // Set from /api/auth/status before the first render. Administrators run the
+  // jobs; field team scan them and can't change or bin anything.
+  let currentUser = null;
+  let canManage = true;
+
   function scannedBy() {
-    return 'Crew';
+    return (currentUser && (currentUser.name || currentUser.email)) || 'Crew';
   }
 
   function toast(msg) {
@@ -145,6 +150,7 @@
     }
 
     if (hash === '/trash') {
+      if (!canManage) { navigate('/'); return; }
       renderTrash();
       return;
     }
@@ -202,6 +208,7 @@
       <div class="row between">
         <h1>Projects</h1>
         <div class="row" style="gap:8px;">
+          ${canManage ? `
           <button class="secondary" id="trashLink">Trash</button>
           <div class="new-project-menu">
             <button class="primary new-project-btn" id="newProjectToggle" aria-label="New project">+</button>
@@ -219,34 +226,38 @@
               </div>
               <div id="importMsg" style="margin-top:10px;"></div>
             </div>
-          </div>
+          </div>` : ''}
         </div>
       </div>
       <div class="card">
         <div class="unit-grid" id="projectGrid"></div>
-        ${projects.length === 0 ? '<p class="help">No projects yet — click the + button above to create your first one.</p>' : ''}
+        ${projects.length === 0 ? (canManage
+          ? '<p class="help">No projects yet — click the + button above to create your first one.</p>'
+          : '<p class="help">No projects yet. An administrator sets these up.</p>') : ''}
       </div>
     `;
 
-    document.getElementById('trashLink').addEventListener('click', () => navigate('/trash'));
+    if (canManage) {
+      document.getElementById('trashLink').addEventListener('click', () => navigate('/trash'));
 
-    const panel = document.getElementById('newProjectPanel');
-    const toggleBtn = document.getElementById('newProjectToggle');
-    toggleBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      panel.hidden = !panel.hidden;
-    });
-    document.addEventListener('click', (e) => {
-      if (!panel.hidden && !panel.contains(e.target) && e.target !== toggleBtn) {
-        panel.hidden = true;
-      }
-    }, { once: true });
+      const panel = document.getElementById('newProjectPanel');
+      const toggleBtn = document.getElementById('newProjectToggle');
+      toggleBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        panel.hidden = !panel.hidden;
+      });
+      document.addEventListener('click', (e) => {
+        if (!panel.hidden && !panel.contains(e.target) && e.target !== toggleBtn) {
+          panel.hidden = true;
+        }
+      }, { once: true });
+    }
 
     const grid = document.getElementById('projectGrid');
     grid.innerHTML = projects.map((p) => `
       <div class="unit-tile project-tile ${p.totalUnits > 0 && p.completeUnits === p.totalUnits ? 'complete' : (p.doneItems > 0 ? 'inprogress' : '')}" data-id="${p.id}">
-        <button class="project-delete" data-id="${p.id}" aria-label="Move project to trash">&#128465;</button>
-        <button class="project-edit" data-id="${p.id}" aria-label="Rename project">&#9998;</button>
+        ${canManage ? `<button class="project-delete" data-id="${p.id}" aria-label="Move project to trash">&#128465;</button>
+        <button class="project-edit" data-id="${p.id}" aria-label="Rename project">&#9998;</button>` : ''}
         ${p.totalUnits > 0 && p.completeUnits === p.totalUnits ? '<div class="check">&#10003;</div>' : ''}
         <div class="unit-num">${escapeHtml(p.name)}</div>
         <div class="unit-progress">${p.completeUnits}/${p.totalUnits} units</div>
@@ -288,7 +299,7 @@
       });
     });
 
-    document.getElementById('createProjectBtn').addEventListener('click', async () => {
+    if (canManage) document.getElementById('createProjectBtn').addEventListener('click', async () => {
       const nameInput = document.getElementById('newProjectName');
       const fileInput = document.getElementById('importFile');
       const msg = document.getElementById('importMsg');
@@ -532,11 +543,11 @@
       <div class="row between">
         <div class="row" style="gap:8px;">
           <h1 style="margin:0;">${escapeHtml(project.name)}</h1>
-          <button class="secondary" id="renameProjectBtn" aria-label="Rename project" style="padding:4px 8px;">&#9998;</button>
+          ${canManage ? `<button class="secondary" id="renameProjectBtn" aria-label="Rename project" style="padding:4px 8px;">&#9998;</button>` : ''}
         </div>
         <div class="row">
           <button class="secondary" id="backBtn">&larr; ${building === undefined ? 'All projects' : 'Back'}</button>
-          <button class="secondary" id="reimportBtn">Re-import list</button>
+          ${canManage ? `<button class="secondary" id="reimportBtn">Re-import list</button>` : ''}
         </div>
       </div>
       <div class="crumbs">${crumbs.join('<span class="crumb-sep">/</span>')}</div>
@@ -617,7 +628,7 @@
     }
 
     document.getElementById('backBtn').addEventListener('click', () => navigate(backTarget));
-    document.getElementById('renameProjectBtn').addEventListener('click', async () => {
+    if (canManage) document.getElementById('renameProjectBtn').addEventListener('click', async () => {
       const newName = await showPrompt('Rename project', project.name, 'Save');
       if (!newName) return;
       try {
@@ -628,7 +639,7 @@
         toast(`Could not rename: ${err.message}`);
       }
     });
-    document.getElementById('reimportBtn').addEventListener('click', async () => {
+    if (canManage) document.getElementById('reimportBtn').addEventListener('click', async () => {
       const ok = await showConfirm('This replaces the current unit list and all progress for this project. Continue?', 'Replace list');
       if (ok) {
         renderImportIntoProject(project);
@@ -1969,5 +1980,15 @@
     }[c]));
   }
 
-  route();
+  // Who's using this, before anything renders — the buttons a field-team
+  // account never gets should never flash up in the first place.
+  fetch('/api/auth/status', { credentials: 'same-origin' })
+    .then((r) => r.json())
+    .then((status) => {
+      currentUser = status.user || null;
+      // Offline or before sign-in is switched on, nothing changes.
+      canManage = !currentUser || currentUser.role === 'admin';
+    })
+    .catch(() => {})
+    .then(() => route());
 })();

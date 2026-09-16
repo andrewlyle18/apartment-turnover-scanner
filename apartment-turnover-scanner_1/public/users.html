@@ -26,6 +26,7 @@
   .who .email { color:#6b7783; font-size:13px; word-break:break-all; }
   .tag { font-size:11px; font-weight:700; letter-spacing:.4px; padding:4px 8px; border-radius:999px; }
   .tag.admin { background:#e7effa; color:#1c4f86; }
+  .tag.field { background:#eaf5ec; color:#2c6b40; }
   .tag.pending { background:#fdf3e2; color:#8a5a12; }
   .tag.off { background:#f1f2f4; color:#6b7783; }
   .actions { display:flex; gap:8px; flex-wrap:wrap; }
@@ -81,7 +82,7 @@
           <div>
             <label for="role">ACCESS</label>
             <select id="role">
-              <option value="member">Can scan</option>
+              <option value="field">Field team &mdash; scanning only</option>
               <option value="admin">Administrator</option>
             </select>
           </div>
@@ -89,7 +90,8 @@
         <button class="primary" type="submit" id="inviteButton" style="margin-top:16px;width:auto;padding:12px 20px">Create invite code</button>
         <div class="message" id="inviteMessage"></div>
         <p class="note" style="margin-bottom:0">
-          Administrators can invite and remove people. Everyone else can scan and see the projects.
+          Administrators set up projects, import unit lists, export to Excel, and invite or remove people.
+          Field team can see the projects and scan units &mdash; they can't create, rename, re-import or delete a project.
         </p>
       </form>
 
@@ -139,12 +141,10 @@
     who.appendChild(email);
     row.appendChild(who);
 
-    if (user.role === 'admin') {
-      const tag = document.createElement('span');
-      tag.className = 'tag admin';
-      tag.textContent = 'ADMIN';
-      row.appendChild(tag);
-    }
+    const roleTag = document.createElement('span');
+    roleTag.className = 'tag ' + (user.role === 'admin' ? 'admin' : 'field');
+    roleTag.textContent = user.role === 'admin' ? 'ADMIN' : 'FIELD TEAM';
+    row.appendChild(roleTag);
     if (user.pending) {
       const tag = document.createElement('span');
       tag.className = 'tag pending';
@@ -169,12 +169,12 @@
 
     if (user.id !== me.id) {
       const toggleRole = document.createElement('button');
-      toggleRole.textContent = user.role === 'admin' ? 'Make scanner' : 'Make admin';
+      toggleRole.textContent = user.role === 'admin' ? 'Make field team' : 'Make admin';
       toggleRole.onclick = async function () {
         try {
           await api('/api/users/' + user.id, {
             method: 'PATCH',
-            body: JSON.stringify({ role: user.role === 'admin' ? 'member' : 'admin' }),
+            body: JSON.stringify({ role: user.role === 'admin' ? 'field' : 'admin' }),
           });
           load();
         } catch (e) { alert(e.message); }
