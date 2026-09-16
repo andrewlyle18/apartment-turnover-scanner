@@ -157,7 +157,13 @@
 
     const projectMatch = hash.match(/^\/project\/(\d+)$/);
     if (projectMatch) {
-      renderDashboard(parseInt(projectMatch[1], 10));
+      renderTools(parseInt(projectMatch[1], 10));
+      return;
+    }
+
+    const scannerMatch = hash.match(/^\/project\/(\d+)\/scanner$/);
+    if (scannerMatch) {
+      renderDashboard(parseInt(scannerMatch[1], 10));
       return;
     }
 
@@ -480,7 +486,7 @@
   function floorRouteFor(projectId, unitNumber) {
     const building = buildingOfUnit(unitNumber);
     const floor = floorOfUnit(unitNumber);
-    if (building === 'Other' || floor === 'Other') return `/project/${projectId}`;
+    if (building === 'Other' || floor === 'Other') return `/project/${projectId}/scanner`;
     return `/project/${projectId}/b/${encodeURIComponent(building)}/f/${encodeURIComponent(floor)}`;
   }
 
@@ -505,6 +511,68 @@
     });
   }
 
+  // ---------------- Tools ----------------
+  // A project is more than the scanner — this is where the rest will live.
+  // One tool today, so the screen stays a plain list rather than a grid of one.
+  const TOOLS = [
+    {
+      id: 'scanner',
+      name: 'Appliance Scanner',
+      icon: '\u{1F4F7}',
+      blurb: 'Scan model and serial numbers unit by unit.',
+      route: (projectId) => `/project/${projectId}/scanner`,
+    },
+  ];
+
+  async function renderTools(projectId) {
+    root.innerHTML = `<div class="card"><p class="help">Loading...</p></div>`;
+    let project;
+    let summary = null;
+    try {
+      project = (await api(`/api/projects/${projectId}`)).project;
+      const all = await api('/api/projects');
+      summary = (all.projects || []).find((p) => p.id === projectId) || null;
+    } catch (e) {
+      root.innerHTML = `<div class="card"><p class="help">Could not load this project: ${e.message}</p></div>`;
+      return;
+    }
+
+    const progress = summary
+      ? `${summary.completeUnits}/${summary.totalUnits} units complete &middot; ${summary.doneItems}/${summary.totalItems} items scanned`
+      : '';
+
+    root.innerHTML = `
+      <div class="row between">
+        <h1 style="margin:0;">${escapeHtml(project.name)}</h1>
+        <button class="secondary" id="backBtn">&larr; All projects</button>
+      </div>
+      ${progress ? `<p class="help" style="margin:6px 0 0;">${progress}</p>` : ''}
+      <div class="card">
+        <h2 style="margin-top:0;">Tools</h2>
+        <div class="tool-list">
+          ${TOOLS.map((tool) => `
+            <button class="tool-tile" data-tool="${tool.id}">
+              <span class="tool-icon">${tool.icon}</span>
+              <span class="tool-text">
+                <span class="tool-name">${escapeHtml(tool.name)}</span>
+                <span class="tool-blurb">${escapeHtml(tool.blurb)}</span>
+              </span>
+              <span class="tool-go">&rsaquo;</span>
+            </button>
+          `).join('')}
+        </div>
+      </div>
+    `;
+
+    document.getElementById('backBtn').addEventListener('click', () => navigate('/'));
+    root.querySelectorAll('.tool-tile').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const tool = TOOLS.find((t) => t.id === btn.dataset.tool);
+        if (tool) navigate(tool.route(projectId));
+      });
+    });
+  }
+
   function drawDashboard(project, units, building, floor) {
     const totalUnits = units.length;
     const completeUnits = units.filter((u) => u.complete).length;
@@ -525,7 +593,7 @@
     const scopeDone = inScope.reduce((s, u) => s + u.doneItems, 0);
     const scopeTotal = inScope.reduce((s, u) => s + u.totalItems, 0);
 
-    const crumbs = [`<a href="#/project/${project.id}" class="crumb">All buildings</a>`];
+    const crumbs = [`<a href="#/project/${project.id}/scanner" class="crumb">All buildings</a>`];
     if (building !== undefined) {
       const label = building === 'Other' ? 'Other units' : `Building ${escapeHtml(building)}`;
       crumbs.push(floor === undefined ? `<span class="crumb current">${label}</span>`
@@ -537,7 +605,7 @@
 
     const backTarget = floor !== undefined
       ? `/project/${project.id}/b/${encodeURIComponent(building)}`
-      : (building !== undefined ? `/project/${project.id}` : '');
+      : (building !== undefined ? `/project/${project.id}/scanner` : `/project/${project.id}`);
 
     root.innerHTML = `
       <div class="row between">
@@ -546,7 +614,7 @@
           ${canManage ? `<button class="secondary" id="renameProjectBtn" aria-label="Rename project" style="padding:4px 8px;">&#9998;</button>` : ''}
         </div>
         <div class="row">
-          <button class="secondary" id="backBtn">&larr; ${building === undefined ? 'All projects' : 'Back'}</button>
+          <button class="secondary" id="backBtn">&larr; ${building === undefined ? 'Tools' : 'Back'}</button>
           ${canManage ? `<button class="secondary" id="reimportBtn">Re-import list</button>` : ''}
         </div>
       </div>

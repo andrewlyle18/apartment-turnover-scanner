@@ -469,3 +469,26 @@ input[type="text"], input[type="file"] {
   white-space: nowrap;
 }
 .topbar-account a:active { opacity: 0.6; }
+
+/* ---- Tools list (a project's front door) ---- */
+.tool-list { display: flex; flex-direction: column; gap: 10px; }
+.tool-tile {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  padding: 16px 18px;
+  background: #fff;
+  border: 1px solid var(--line, #dde3ea);
+  border-radius: 12px;
+  text-align: left;
+  font-family: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+.tool-tile:hover { border-color: var(--brand-light, #2b6f93); }
+.tool-icon { font-size: 26px; line-height: 1; }
+.tool-text { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+.tool-name { font-weight: 700; font-size: 16px; }
+.tool-blurb { font-size: 13px; color: #6b7783; margin-top: 2px; }
+.tool-go { font-size: 24px; color: #9aa6b2; }
