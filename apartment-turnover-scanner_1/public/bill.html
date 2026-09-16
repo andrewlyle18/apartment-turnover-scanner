@@ -199,8 +199,12 @@
         // The server caps a line at its scheduled value. Show that the moment
         // they leave the box, rather than letting the screen keep a figure
         // the application doesn't actually hold.
-        // After the debounce has had time to save, not before.
-        input.addEventListener('blur', () => setTimeout(() => syncRow(input.closest('tr')), 800));
+        // Once the debounce has saved and nothing else is being typed in,
+        // redraw from what the server actually kept. Chasing individual
+        // fields proved unreliable; rebuilding the table is certain.
+        input.addEventListener('blur', () => setTimeout(() => {
+          if (!main.querySelector('input.entry:focus')) render();
+        }, 900));
       });
       document.getElementById('submitBtn').addEventListener('click', submit);
     } else {
