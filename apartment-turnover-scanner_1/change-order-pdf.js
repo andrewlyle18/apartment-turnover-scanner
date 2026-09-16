@@ -284,6 +284,18 @@ async function buildChangeOrderPdf(context) {
     page.drawText(label, { x: PAGE.width / 2 - width / 2, y: 48, size: 8, font: regular, color: INK });
   });
 
+  if (co.status === 'pending') {
+    // A draft that escapes before it's approved should say so — on the pages
+    // this app produced, and not on the subcontractor's own paperwork behind
+    // them, which isn't ours to stamp.
+    for (const page of generated) {
+      page.drawText('PENDING', {
+        x: 150, y: 330, size: 82, font: bold, color: rgb(0.88, 0.90, 0.92),
+        rotate: degrees(38), opacity: 0.28,
+      });
+    }
+  }
+
   // ---------- The backup ----------
   for (const attachment of attachments) {
     const type = String(attachment.content_type || '').toLowerCase();
@@ -322,16 +334,6 @@ async function buildChangeOrderPdf(context) {
       const page = pdf.addPage([PAGE.width, PAGE.height]);
       page.drawText(`Could not include ${attachment.filename}`, {
         x: MARGIN, y: PAGE.height - MARGIN, size: 10, font: bold, color: INK,
-      });
-    }
-  }
-
-  if (co.status === 'pending') {
-    // A draft that escapes before it's approved should say so on every page.
-    for (const page of pdf.getPages()) {
-      page.drawText('PENDING', {
-        x: 150, y: 330, size: 82, font: bold, color: rgb(0.88, 0.90, 0.92),
-        rotate: degrees(38), opacity: 0.28,
       });
     }
   }
