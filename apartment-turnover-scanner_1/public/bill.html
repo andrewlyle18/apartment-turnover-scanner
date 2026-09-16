@@ -199,7 +199,8 @@
         // The server caps a line at its scheduled value. Show that the moment
         // they leave the box, rather than letting the screen keep a figure
         // the application doesn't actually hold.
-        input.addEventListener('blur', () => syncRow(input.closest('tr')));
+        // After the debounce has had time to save, not before.
+        input.addEventListener('blur', () => setTimeout(() => syncRow(input.closest('tr')), 800));
       });
       document.getElementById('submitBtn').addEventListener('click', submit);
     } else {
@@ -263,13 +264,16 @@
     saveTimer = setTimeout(save, 700);
   }
 
+  // Called when a box loses focus, so it writes back unconditionally: during
+  // a blur event the browser may still report that box as the active element,
+  // and guarding on that is what left a capped figure on screen.
   function syncRow(row) {
     if (!row) return;
     const line = data.lines.find((l) => l.id === Number(row.dataset.line));
     if (!line) return;
     const set = (field, value) => {
       const input = row.querySelector(`[data-field="${field}"]`);
-      if (input && document.activeElement !== input) input.value = value;
+      if (input) input.value = value;
     };
     set('thisPeriod', line.thisPeriod);
     set('materialsStored', line.materialsStored);
