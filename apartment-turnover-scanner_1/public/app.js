@@ -2582,6 +2582,8 @@
 
     const co = data.changeOrder;
     const s = data.sums;
+    const sovLine = data.sovLine;
+    const commitment = data.commitment || {};
     const locked = co.status === 'approved';
     const lines = data.lines.length ? data.lines : [{ budget_code: '', description: '', amount: 0 }];
 
@@ -2680,6 +2682,22 @@
           <div class="row" style="margin-top:10px;"><button class="secondary" id="saveProjectAddress">Save project address</button></div>
           <p class="help">The change order prints the job's address; the conditional waiver names the property owner. Set them once and every document after this has them.</p>
         ` : ''}
+        ${locked && sovLine ? `
+        <div style="margin-top:18px; padding-top:14px; border-top:1px solid #e6e6e6;">
+          <strong style="font-size:13px;">Retainage on this change order</strong>
+          <div class="row" style="gap:10px; align-items:flex-end; margin-top:8px;">
+            <label style="flex:0 0 130px;">PERCENT
+              <input type="number" id="coRetPct" min="0" max="50" step="0.5"
+                value="${sovLine.retainage_pct === null || sovLine.retainage_pct === undefined
+                  ? Number(commitment.retainage_pct || 0) * 100
+                  : Number(sovLine.retainage_pct) * 100}" />
+            </label>
+            <button class="secondary" id="saveCoRet">Save</button>
+          </div>
+          <p class="help" style="margin-top:8px;">Normally the contract rate. Set it to 0 where this change order was
+            paid out in full without retainage being held &mdash; the applications then show what was really held
+            instead of a figure nobody kept.</p>
+        </div>` : ''}
         <div class="row between" style="margin-top:16px; gap:8px;">
           <span class="row" style="gap:8px;">
             ${locked
@@ -2831,6 +2849,20 @@
       } catch (e) { toast(e.message); }
     });
 
+    const saveCoRet = document.getElementById('saveCoRet');
+    if (saveCoRet) saveCoRet.addEventListener('click', async () => {
+      const value = Number(document.getElementById('coRetPct').value);
+      if (!Number.isFinite(value) || value < 0 || value > 50) return toast('Enter a percent between 0 and 50');
+      try {
+        await api(`/api/sov-lines/${sovLine.id}/retainage`, {
+          method: 'PATCH',
+          body: JSON.stringify({ retainagePct: value / 100 }),
+        });
+        toast(value === 0 ? 'No retainage held on this change order' : `Retainage set to ${value}%`);
+        renderChangeOrder(projectId, commitmentId, changeOrderId);
+      } catch (e) { toast(e.message); }
+    });
+
     document.getElementById('deleteCo').addEventListener('click', async () => {
       const ok = await showConfirm(
         `Delete ${co.number} (${money(s.thisChangeOrder)})? Its line items and attachments go with it. This can't be undone.`,
@@ -2945,9 +2977,14 @@
           <tr><td>2. Net change by change orders</td><td class="num">${money(s.netChangeByChangeOrders)}</td></tr>
           <tr><td>3. Contract sum to date</td><td class="num">${money(s.contractSumToDate)}</td></tr>
           <tr><td>4. Total completed and stored to date</td><td class="num">${money(s.totalCompletedAndStored)}</td></tr>
-          <tr><td>5. Retainage</td><td class="num">${money(s.totalRetainage)}</td></tr>
+          <tr><td>5. Retainage <span class="help">(${(s.effectiveRetainageRate * 100).toFixed(2)}% of completed work${
+            Math.abs(s.effectiveRetainageRate - s.contractRetainageRate) > 0.0001
+              ? `, contract rate ${(s.contractRetainageRate * 100).toFixed(0)}%` : ''})</span></td><td class="num">${money(s.totalRetainage)}</td></tr>
           <tr><td>6. Total earned less retainage</td><td class="num">${money(s.totalEarnedLessRetainage)}</td></tr>
-          <tr><td>7. Less previous certificates</td><td class="num">${money(s.previousCertificates)}</td></tr>
+          <tr><td>7. Less previous certificates${
+            Number(s.priorPaymentAdjustment) > 0
+              ? `<br><span class="help">${money(s.previousCertificatesFromApplications)} from application ${p.number - 1}, plus ${money(s.priorPaymentAdjustment)}${p.prior_payment_note ? ` ${escapeHtml(p.prior_payment_note)}` : ' paid outside the applications'}</span>`
+              : ''}</td><td class="num">${money(s.previousCertificates)}</td></tr>
           <tr class="due"><td>8. Current payment due</td><td class="num">${money(s.currentPaymentDue)}</td></tr>
           <tr><td>9. Balance to finish, including retainage</td><td class="num">${money(s.balanceToFinishIncludingRetainage)}</td></tr>
         </table>
@@ -2964,6 +3001,35 @@
           </span>
         </div>
       </div>
+
+      ${canManage ? `
+      <div class="card">
+        <h2 style="margin-top:0;">Paid outside this application</h2>
+        <p class="help">Money that already reached ${escapeHtml(c.sub_company)} without going through an application &mdash;
+          a change order paid direct, a mobilisation cheque. It comes off line 7 so the next application
+          doesn't pay it twice, and it never counts as earned work.</p>
+        <div class="row" style="gap:10px; align-items:flex-end; margin-top:10px;">
+          <label style="flex:0 0 160px;">Amount
+            <input type="number" step="0.01" min="0" id="priorAdj" value="${Number(p.prior_payment_adjustment || 0).toFixed(2)}">
+          </label>
+          <label style="flex:1;">What it was
+            <input type="text" id="priorNote" maxlength="120" placeholder="e.g. CO #02 paid direct, no retainage held"
+              value="${escapeHtml(p.prior_payment_note || '')}">
+          </label>
+          <button class="secondary" id="savePrior">Save</button>
+        </div>
+      </div>
+
+      <div class="card danger-zone">
+        <div class="row between" style="align-items:center; gap:12px;">
+          <div>
+            <strong>Delete this application</strong>
+            <p class="help" style="margin:4px 0 0;">Only the newest application on a commitment can go, so nothing
+              billed on top of it changes behind your back.</p>
+          </div>
+          <button class="danger-quiet" id="deletePayApp">Delete&hellip;</button>
+        </div>
+      </div>` : ''}
     `;
 
     document.getElementById('backBtn').addEventListener('click', () => navigate(`/project/${projectId}/commitment/${commitmentId}`));
@@ -3011,6 +3077,42 @@
       try {
         await api(`/api/pay-apps/${payAppId}`, { method: 'PATCH', body: JSON.stringify({ status: 'open' }) });
         renderPayApp(projectId, commitmentId, payAppId);
+      } catch (e) { toast(e.message); }
+    });
+
+    const savePrior = document.getElementById('savePrior');
+    if (savePrior) savePrior.addEventListener('click', async () => {
+      try {
+        await api(`/api/pay-apps/${payAppId}`, {
+          method: 'PATCH',
+          body: JSON.stringify({
+            priorPaymentAdjustment: Number(document.getElementById('priorAdj').value || 0),
+            priorPaymentNote: document.getElementById('priorNote').value,
+          }),
+        });
+        toast('Saved');
+        renderPayApp(projectId, commitmentId, payAppId);
+      } catch (e) { toast(e.message); }
+    });
+
+    const deletePayApp = document.getElementById('deletePayApp');
+    if (deletePayApp) deletePayApp.addEventListener('click', async () => {
+      const approved = p.status === 'approved';
+      let body = {};
+      if (approved) {
+        const typed = await showPrompt(
+          `Application #${p.number} was approved for ${money(s.currentPaymentDue)}. Type ${p.number} to confirm.`,
+          '', 'Delete application');
+        if (typed === null) return;
+        body = { confirmNumber: typed.trim() };
+      } else {
+        const ok = await showConfirm(`Delete application #${p.number}? This can't be undone.`, 'Delete');
+        if (!ok) return;
+      }
+      try {
+        await api(`/api/pay-apps/${payAppId}`, { method: 'DELETE', body: JSON.stringify(body) });
+        toast('Application deleted');
+        navigate(`/project/${projectId}/commitment/${commitmentId}`);
       } catch (e) { toast(e.message); }
     });
   }
