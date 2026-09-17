@@ -552,11 +552,30 @@ function mountBillingRoutes(app, { adminOnly, upload }) {
     const commitment = await pool.query('SELECT * FROM commitments WHERE id = $1', [commitmentId]);
     if (!commitment.rows.length) return res.status(404).json({ error: 'Commitment not found' });
 
+    // Backfilling records an application that was billed before this job was on
+    // the system — a subcontractor part-way through when we onboarded them. It
+    // takes its own number and slots in behind the ones already here, so the
+    // "still open" rule (which is about not billing twice for the same period)
+    // doesn't apply to it.
+    const backfill = b.backfill === true;
+    const wantedNumber = backfill ? parseInt(b.number, 10) : null;
+    if (backfill && (!Number.isInteger(wantedNumber) || wantedNumber < 1)) {
+      return res.status(400).json({ error: 'A backfilled application needs its number.' });
+    }
+    if (backfill) {
+      const clash = await pool.query(
+        'SELECT id FROM pay_apps WHERE commitment_id = $1 AND number = $2', [commitmentId, wantedNumber]
+      );
+      if (clash.rows.length) {
+        return res.status(409).json({ error: `There is already an application #${wantedNumber} here.` });
+      }
+    }
+
     const open = await pool.query(
       `SELECT id, number FROM pay_apps WHERE commitment_id = $1 AND status <> 'approved' ORDER BY number DESC LIMIT 1`,
       [commitmentId]
     );
-    if (open.rows.length) {
+    if (!backfill && open.rows.length) {
       return res.status(409).json({
         error: `Application #${open.rows[0].number} is still open. Approve or delete it before starting another.`,
       });
@@ -568,7 +587,7 @@ function mountBillingRoutes(app, { adminOnly, upload }) {
       const next = await client.query(
         'SELECT COALESCE(MAX(number), 0) + 1 AS n FROM pay_apps WHERE commitment_id = $1', [commitmentId]
       );
-      const number = next.rows[0].n;
+      const number = backfill ? wantedNumber : next.rows[0].n;
       const token = newToken();
 
       const created = await client.query(
@@ -593,10 +612,13 @@ function mountBillingRoutes(app, { adminOnly, upload }) {
            FROM pay_app_lines l
            JOIN pay_apps p ON p.id = l.pay_app_id
            WHERE p.commitment_id = $2 AND p.status = 'approved'
-             AND p.number = (SELECT MAX(number) FROM pay_apps WHERE commitment_id = $2 AND status = 'approved')
+             AND p.number = (
+               SELECT MAX(number) FROM pay_apps
+               WHERE commitment_id = $2 AND status = 'approved' AND number < $3
+             )
          ) prior ON prior.sov_line_id = s.id
          WHERE s.commitment_id = $2`,
-        [payApp.id, commitmentId]
+        [payApp.id, commitmentId, number]
       );
 
       await client.query('COMMIT');
@@ -657,6 +679,20 @@ function mountBillingRoutes(app, { adminOnly, upload }) {
     let i = 1;
     const set = (column, value) => { fields.push(`${column} = $${i++}`); values.push(value); };
 
+    if (b.number !== undefined) {
+      const wanted = parseInt(b.number, 10);
+      if (!Number.isInteger(wanted) || wanted < 1) {
+        return res.status(400).json({ error: 'An application number has to be a whole number.' });
+      }
+      const clash = await pool.query(
+        'SELECT id FROM pay_apps WHERE commitment_id = $1 AND number = $2 AND id <> $3',
+        [existing.rows[0].commitment_id, wanted, id]
+      );
+      if (clash.rows.length) {
+        return res.status(409).json({ error: `There is already an application #${wanted} here.` });
+      }
+      set('number', wanted);
+    }
     if (b.invoiceNo !== undefined) set('invoice_no', trim(b.invoiceNo) || null);
     if (b.periodStart !== undefined) set('period_start', b.periodStart || null);
     if (b.periodEnd !== undefined) set('period_end', b.periodEnd || null);
