@@ -2924,7 +2924,10 @@
     const lineRow = (l) => `
       <tr>
         <td>${escapeHtml(l.itemNo || '')}</td>
-        <td>${escapeHtml(l.description)}${l.edited ? ` <span class="pill edited">EDITED</span>` : ''}</td>
+        <td>${escapeHtml(l.description)}${l.edited ? ` <span class="pill edited">EDITED</span>` : ''}${
+          editable && canManage && !l.previousCompleted && !l.thisPeriod && !l.materialsStored
+            ? ` <button class="link-quiet" data-drop-line="${l.id}" title="This line wasn't in the contract during this period">remove</button>`
+            : ''}</td>
         <td class="num">${money(l.scheduledValue)}</td>
         <td class="num">${money(l.previousCompleted)}</td>
         <td class="num">${editable
@@ -3132,6 +3135,16 @@
         toast('Saved');
         renderPayApp(projectId, commitmentId, payAppId);
       } catch (e) { toast(e.message); }
+    });
+
+    root.querySelectorAll('[data-drop-line]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        try {
+          await api(`/api/pay-apps/${payAppId}/lines/${btn.dataset.dropLine}`, { method: 'DELETE' });
+          toast('Removed from this application');
+          renderPayApp(projectId, commitmentId, payAppId);
+        } catch (e) { toast(e.message); }
+      });
     });
 
     const resync = document.getElementById('resyncPrev');
