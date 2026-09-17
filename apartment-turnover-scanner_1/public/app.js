@@ -2348,8 +2348,13 @@
             <label>PERIOD TO<input type="date" id="pEnd" /></label>
             <label>INVOICE NO.<input type="text" id="pInvoice" placeholder="optional" /></label>
           </div>
-          <div class="row" style="margin-top:10px;"><button class="primary" id="openPeriod">Open billing period</button></div>
+          <div class="row" style="margin-top:10px; gap:8px;">
+            <button class="primary" id="openPeriod">Open billing period</button>
+            <button class="secondary" id="backfillPeriod">Record an earlier application</button>
+          </div>
           <p class="help" style="margin-top:8px;">Opening a period creates the link you send the sub. Previous completed carries forward from the last approved application.</p>
+          <p class="help">Use <em>record an earlier application</em> for billing that happened before this sub was on here &mdash;
+            it takes the number you give it and slots in behind the ones already listed.</p>
         ` : '<p class="help">Add the schedule of values before opening a billing period.</p>'}
       </div>
       `}
@@ -2541,6 +2546,29 @@
           const result = await api(`/api/commitments/${commitmentId}/pay-apps`, {
             method: 'POST',
             body: JSON.stringify({
+              periodStart: document.getElementById('pStart').value || null,
+              periodEnd: document.getElementById('pEnd').value || null,
+              invoiceNo: document.getElementById('pInvoice').value.trim(),
+            }),
+          });
+          navigate(`/project/${projectId}/commitment/${commitmentId}/app/${result.payApp.id}`);
+        } catch (e) { toast(e.message); }
+      });
+    }
+
+    const backfillBtn = document.getElementById('backfillPeriod');
+    if (backfillBtn) {
+      backfillBtn.addEventListener('click', async () => {
+        const typed = await showPrompt(
+          'What number was this application? It slots in at that position and everything after it re-reads its figures.',
+          '1', 'Record it');
+        if (typed === null) return;
+        try {
+          const result = await api(`/api/commitments/${commitmentId}/pay-apps`, {
+            method: 'POST',
+            body: JSON.stringify({
+              backfill: true,
+              number: parseInt(typed, 10),
               periodStart: document.getElementById('pStart').value || null,
               periodEnd: document.getElementById('pEnd').value || null,
               invoiceNo: document.getElementById('pInvoice').value.trim(),
@@ -3004,11 +3032,14 @@
 
       ${canManage ? `
       <div class="card">
-        <h2 style="margin-top:0;">Paid outside this application</h2>
+        <h2 style="margin-top:0;">Numbering &amp; payments made outside</h2>
         <p class="help">Money that already reached ${escapeHtml(c.sub_company)} without going through an application &mdash;
           a change order paid direct, a mobilisation cheque. It comes off line 7 so the next application
           doesn't pay it twice, and it never counts as earned work.</p>
         <div class="row" style="gap:10px; align-items:flex-end; margin-top:10px;">
+          <label style="flex:0 0 130px;">Application no.
+            <input type="number" min="1" step="1" id="appNumber" value="${p.number}">
+          </label>
           <label style="flex:0 0 160px;">Amount
             <input type="number" step="0.01" min="0" id="priorAdj" value="${Number(p.prior_payment_adjustment || 0).toFixed(2)}">
           </label>
@@ -3086,6 +3117,7 @@
         await api(`/api/pay-apps/${payAppId}`, {
           method: 'PATCH',
           body: JSON.stringify({
+            number: parseInt(document.getElementById('appNumber').value, 10),
             priorPaymentAdjustment: Number(document.getElementById('priorAdj').value || 0),
             priorPaymentNote: document.getElementById('priorNote').value,
           }),
