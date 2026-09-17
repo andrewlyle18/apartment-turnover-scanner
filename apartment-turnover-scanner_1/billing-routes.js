@@ -668,6 +668,53 @@ function mountBillingRoutes(app, { adminOnly, upload }) {
     res.json(await applicationView(payAppId));
   });
 
+  /**
+   * Re-read "previous completed" from whatever now sits in front of this
+   * application. Needed when an earlier application is recorded after the fact:
+   * work that this one called "this period" was, it turns out, already billed.
+   *
+   * Total completed to date per line does not move — only the split between
+   * previous and this period — so nothing about what the sub has earned
+   * changes, and neither does the contract sum. It just stops the same work
+   * being claimed as new twice in the paperwork.
+   */
+  app.post('/api/pay-apps/:id/resync-previous', adminOnly, async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    const row = await pool.query('SELECT commitment_id, number, status FROM pay_apps WHERE id = $1', [id]);
+    if (!row.rows.length) return res.status(404).json({ error: 'Application not found' });
+    if (row.rows[0].status === 'approved') {
+      return res.status(409).json({ error: 'This application is approved. Reopen it first.' });
+    }
+    const { commitment_id: commitmentId, number } = row.rows[0];
+
+    const moved = await pool.query(
+      `WITH prior AS (
+         SELECT l.sov_line_id,
+                l.previous_completed + l.this_period + l.materials_stored AS total
+         FROM pay_app_lines l
+         JOIN pay_apps p ON p.id = l.pay_app_id
+         WHERE p.commitment_id = $2 AND p.status = 'approved'
+           AND p.number = (
+             SELECT MAX(number) FROM pay_apps
+             WHERE commitment_id = $2 AND status = 'approved' AND number < $3
+           )
+       )
+       UPDATE pay_app_lines l
+       SET previous_completed = COALESCE(prior.total, 0),
+           this_period = GREATEST(
+             0,
+             l.previous_completed + l.this_period - COALESCE(prior.total, 0)
+           )
+       FROM (SELECT sov_line_id, total FROM prior) prior
+       WHERE l.pay_app_id = $1 AND l.sov_line_id = prior.sov_line_id
+         AND l.previous_completed IS DISTINCT FROM prior.total
+       RETURNING l.sov_line_id`,
+      [id, commitmentId, number]
+    );
+
+    res.json({ ok: true, linesChanged: moved.rowCount, ...(await applicationView(id)) });
+  });
+
   app.patch('/api/pay-apps/:id', adminOnly, async (req, res) => {
     const id = parseInt(req.params.id, 10);
     const b = req.body || {};
