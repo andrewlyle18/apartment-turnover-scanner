@@ -258,6 +258,28 @@ function mountBillingRoutes(app, { adminOnly, upload }) {
     }
   }
 
+  // Retainage on ONE line. Everything else about a billed schedule of values is
+  // frozen, but the rate is not a quantity — waiving it on a change order that
+  // was already paid out in full doesn't rewrite what anyone billed, it records
+  // what was actually held. Every application recomputes from it.
+  app.patch('/api/sov-lines/:id/retainage', adminOnly, async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    const b = req.body || {};
+    const row = await pool.query('SELECT id, description FROM sov_lines WHERE id = $1', [id]);
+    if (!row.rows.length) return res.status(404).json({ error: 'Line not found' });
+
+    if (b.retainagePct === null || b.retainagePct === '') {
+      await pool.query('UPDATE sov_lines SET retainage_pct = NULL WHERE id = $1', [id]);
+      return res.json({ ok: true, retainagePct: null });
+    }
+    const rate = Number(b.retainagePct);
+    if (!Number.isFinite(rate) || rate < 0 || rate > 1) {
+      return res.status(400).json({ error: 'Retainage has to be between 0 and 100%.' });
+    }
+    await pool.query('UPDATE sov_lines SET retainage_pct = $1 WHERE id = $2', [rate.toFixed(4), id]);
+    res.json({ ok: true, retainagePct: rate });
+  });
+
   app.post('/api/commitments/:id/change-orders', adminOnly, async (req, res) => {
     const commitmentId = parseInt(req.params.id, 10);
     const b = req.body || {};
@@ -640,6 +662,14 @@ function mountBillingRoutes(app, { adminOnly, upload }) {
     if (b.periodEnd !== undefined) set('period_end', b.periodEnd || null);
     if (b.applicationDate !== undefined) set('application_date', b.applicationDate || null);
     if (b.note !== undefined) set('note', trim(b.note) || null);
+    if (b.priorPaymentAdjustment !== undefined) {
+      const amount = Number(b.priorPaymentAdjustment);
+      if (!Number.isFinite(amount) || amount < 0) {
+        return res.status(400).json({ error: 'A prior payment has to be a positive amount.' });
+      }
+      set('prior_payment_adjustment', amount.toFixed(2));
+    }
+    if (b.priorPaymentNote !== undefined) set('prior_payment_note', trim(b.priorPaymentNote) || null);
 
     if (b.status !== undefined) {
       if (!['open', 'submitted', 'approved'].includes(b.status)) {
@@ -668,11 +698,37 @@ function mountBillingRoutes(app, { adminOnly, upload }) {
 
   app.delete('/api/pay-apps/:id', adminOnly, async (req, res) => {
     const id = parseInt(req.params.id, 10);
-    const row = await pool.query('SELECT status FROM pay_apps WHERE id = $1', [id]);
+    const row = await pool.query(
+      'SELECT commitment_id, number, status FROM pay_apps WHERE id = $1',
+      [id]
+    );
     if (!row.rows.length) return res.status(404).json({ error: 'Application not found' });
-    if (row.rows[0].status === 'approved') {
-      return res.status(409).json({ error: 'An approved application cannot be deleted.' });
+    const { commitment_id: commitmentId, number, status } = row.rows[0];
+
+    // A later application reads this one's line 6 as its "less previous
+    // certificates". Pull one out of the middle and every application after it
+    // silently changes what it says the sub is owed — so the newest goes first.
+    const later = await pool.query(
+      'SELECT number FROM pay_apps WHERE commitment_id = $1 AND number > $2 ORDER BY number LIMIT 1',
+      [commitmentId, number]
+    );
+    if (later.rows.length) {
+      return res.status(409).json({
+        error: `Application ${number} is what application ${later.rows[0].number} bills on top of. `
+          + `Delete ${later.rows[0].number} first, or this one's figures would move without anyone seeing it.`,
+      });
     }
+
+    // Approved means it has been certified — deleting it needs to be a decision,
+    // not a mis-click, so the number has to be typed back.
+    if (status === 'approved' && String((req.body || {}).confirmNumber || '').trim() !== String(number)) {
+      return res.status(409).json({
+        error: 'This application was approved. Type its number to confirm.',
+        needsConfirmation: true,
+        number,
+      });
+    }
+
     await pool.query('DELETE FROM pay_apps WHERE id = $1', [id]);
     res.json({ ok: true });
   });

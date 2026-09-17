@@ -141,7 +141,10 @@ async function buildApplicationPdf(view, project) {
     ['2.', 'Net change by change orders', summary.netChangeByChangeOrders],
     ['3.', 'Contract sum to date (line 1 ± 2)', summary.contractSumToDate],
     ['4.', 'Total completed and stored to date', summary.totalCompletedAndStored],
-    ['5.', `Retainage (${percent(Number(commitment.retainage_pct))} of completed work)`, summary.totalRetainage],
+    // The rate printed here is what retainage ACTUALLY came to across every
+    // line billed, not the contract rate. Where retainage was waived on a
+    // change order the two differ, and the document should say the true one.
+    ['5.', `Retainage (${percent(summary.effectiveRetainageRate)} of completed work)`, summary.totalRetainage],
     ['6.', 'Total earned less retainage (line 4 less line 5)', summary.totalEarnedLessRetainage],
     ['7.', 'Less previous certificates for payment', summary.previousCertificates],
     ['8.', 'CURRENT PAYMENT DUE', summary.currentPaymentDue],
@@ -156,6 +159,19 @@ async function buildApplicationPdf(view, project) {
     a.text(money(value), RIGHT - 6, y, { size: isDue ? 10 : 9, font: isDue ? bold : regular, align: 'right' });
     y -= isDue ? 24 : 17;
     if (!isDue) a.line(MARGIN, y + 5, RIGHT);
+
+    // A payment made outside the application chain is the one figure on this
+    // page nobody can derive from the others. Say what it was, under line 7,
+    // rather than leaving a reader to wonder why line 7 beats the last line 6.
+    if (number === '7.' && Number(summary.priorPaymentAdjustment) > 0) {
+      const note = payApp.prior_payment_note
+        || 'paid outside the application chain';
+      a.text(
+        `includes ${money(summary.priorPaymentAdjustment)} ${note}`,
+        MARGIN + 26, y + 9, { size: 7.5, color: GREY }
+      );
+      y -= 10;
+    }
   }
 
   y -= 14;

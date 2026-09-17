@@ -166,9 +166,20 @@ const CO_EXTRA_COLUMNS = `
   ALTER TABLE projects ADD COLUMN IF NOT EXISTS owner_name TEXT;
 `;
 
+// Money that reached the subcontractor outside the application chain — a change
+// order paid direct, a mobilisation cheque. Line 7 has to account for it or the
+// next application pays it twice, but it is NOT part of line 6, so it must never
+// leak into the next application's "previous certificates" lookup. Hence a
+// column of its own, and a note saying out loud what it was.
+const PAY_APP_EXTRA_COLUMNS = `
+  ALTER TABLE pay_apps ADD COLUMN IF NOT EXISTS prior_payment_adjustment NUMERIC(14,2) NOT NULL DEFAULT 0;
+  ALTER TABLE pay_apps ADD COLUMN IF NOT EXISTS prior_payment_note TEXT;
+`;
+
 async function initBilling() {
   await pool.query(SCHEMA);
   await pool.query(CO_EXTRA_COLUMNS);
+  await pool.query(PAY_APP_EXTRA_COLUMNS);
 }
 
 /**
@@ -211,6 +222,14 @@ async function changeOrderContext(changeOrderId) {
      FROM co_attachments WHERE change_order_id = $1 ORDER BY sort_order, id`,
     [changeOrderId]
   );
+  // The schedule-of-values line this change order became when it was approved —
+  // the screen needs it to show what retainage is actually being held on it.
+  const sovLine = await pool.query(
+    'SELECT id, retainage_pct FROM sov_lines WHERE change_order_id = $1 LIMIT 1', [changeOrderId]
+  );
+  const commitmentRate = await pool.query(
+    'SELECT retainage_pct FROM commitments WHERE id = $1', [co.commitment_id]
+  );
 
   const originalCents = toCents(base.rows[0].total);
   const previousCents = toCents(previous.rows[0].total);
@@ -220,6 +239,8 @@ async function changeOrderContext(changeOrderId) {
     changeOrder: co,
     lines: lines.rows,
     attachments: attachments.rows,
+    sovLine: sovLine.rows[0] || null,
+    commitment: commitmentRate.rows[0] || null,
     sums: {
       originalContractSum: toDollars(originalCents),
       netChangeByPrevious: toDollars(previousCents),
@@ -250,7 +271,7 @@ const applyRate = (cents, rate) => Math.round(cents * Number(rate || 0));
  * The whole arithmetic of one application, in one place. Both the screens and
  * the PDFs read this, so they can never disagree.
  */
-function computePayApp({ commitment, lines, previousCertificatesCents }) {
+function computePayApp({ commitment, lines, previousCertificatesCents, priorPaymentAdjustmentCents = 0 }) {
   const defaultRate = Number(commitment.retainage_pct || 0);
   const materialsRate = Number(commitment.materials_retainage_pct || 0);
 
@@ -329,7 +350,18 @@ function computePayApp({ commitment, lines, previousCertificatesCents }) {
   const retainageOnStored = retainageOf(priced, (c) => c.stored, () => materialsRate);
   const totalRetainage = retainageOnWork + retainageOnStored;
   const earnedLessRetainage = completedAndStored - totalRetainage;
-  const currentDue = earnedLessRetainage - previousCertificatesCents;
+  // Line 7 = the prior certificate PLUS anything already paid outside the chain.
+  // Line 6 above is deliberately untouched by the adjustment: the next
+  // application reads line 6, and a direct payment is not earned value.
+  const priorPayments = previousCertificatesCents + priorPaymentAdjustmentCents;
+  const currentDue = earnedLessRetainage - priorPayments;
+
+  // What retainage actually worked out to across everything billed. Never
+  // assume it equals the contract rate — a line billed at a different rate, or
+  // a change order where retainage was waived, moves it, and the G702 prints
+  // this figure, not the contract's.
+  const completedWork = sum(priced, (c) => c.previous + c.thisPeriod);
+  const effectiveRate = completedWork ? retainageOnWork / completedWork : 0;
 
   return {
     lines: priced.map(({ _cents, ...rest }) => rest),
@@ -345,7 +377,11 @@ function computePayApp({ commitment, lines, previousCertificatesCents }) {
       retainageOnStoredMaterial: toDollars(retainageOnStored),
       totalRetainage: toDollars(totalRetainage),
       totalEarnedLessRetainage: toDollars(earnedLessRetainage),
-      previousCertificates: toDollars(previousCertificatesCents),
+      previousCertificates: toDollars(priorPayments),
+      previousCertificatesFromApplications: toDollars(previousCertificatesCents),
+      priorPaymentAdjustment: toDollars(priorPaymentAdjustmentCents),
+      effectiveRetainageRate: effectiveRate,
+      contractRetainageRate: defaultRate,
       currentPaymentDue: toDollars(currentDue),
       balanceToFinishIncludingRetainage: toDollars(contractToDate - earnedLessRetainage),
     },
@@ -391,7 +427,12 @@ async function applicationView(payAppId) {
   if (!loaded) return null;
   const { payApp, commitment, lines } = loaded;
   const previous = await previousCertificatesFor(commitment.id, payApp.number);
-  const computed = computePayApp({ commitment, lines, previousCertificatesCents: previous });
+  const computed = computePayApp({
+    commitment,
+    lines,
+    previousCertificatesCents: previous,
+    priorPaymentAdjustmentCents: toCents(payApp.prior_payment_adjustment),
+  });
   return { payApp, commitment, ...computed };
 }
 
