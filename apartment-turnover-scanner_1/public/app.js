@@ -127,6 +127,32 @@
     });
   }
 
+  /**
+   * Wire a handler to an element that may not be on the page right now.
+   *
+   * Most of these screens render different controls per tab and per status, so
+   * an id that exists in one state is simply absent in another. Reaching
+   * straight through getElementById threw a TypeError there, and because these
+   * are long straight-line blocks of wiring, one miss killed every handler
+   * BELOW it — which is how the invoicing rows stopped opening and a change
+   * order's Delete button stopped responding. A missing element is normal; it
+   * should mean "nothing to wire", not "stop".
+   */
+  // An application's states, in the words a contractor already uses for them.
+  const STATUS_LABEL = {
+    open: 'DRAFT',
+    submitted: 'UNDER REVIEW',
+    revise: 'REVISE & RESUBMIT',
+    approved: 'APPROVED',
+  };
+  const statusLabel = (s) => STATUS_LABEL[s] || String(s || '').toUpperCase();
+
+  function on(id, event, handler) {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener(event, handler);
+    return el;
+  }
+
   async function api(path, opts) {
     const resp = await fetch(path, {
       headers: { 'Content-Type': 'application/json' },
@@ -299,7 +325,7 @@
     `;
 
     if (canManage) {
-      document.getElementById('trashLink').addEventListener('click', () => navigate('/trash'));
+      on('trashLink', 'click', () => navigate('/trash'));
 
       const panel = document.getElementById('newProjectPanel');
       const toggleBtn = document.getElementById('newProjectToggle');
@@ -368,7 +394,7 @@
       });
     });
 
-    if (canManage) document.getElementById('createProjectBtn').addEventListener('click', async () => {
+    if (canManage) on('createProjectBtn', 'click', async () => {
       const nameInput = document.getElementById('newProjectName');
       const fileInput = document.getElementById('importFile');
       const msg = document.getElementById('importMsg');
@@ -415,7 +441,7 @@
       </div>
     `;
 
-    document.getElementById('backToProjectsBtn').addEventListener('click', () => navigate(''));
+    on('backToProjectsBtn', 'click', () => navigate(''));
 
     const grid = document.getElementById('trashGrid');
     grid.innerHTML = projects.map((p) => `
@@ -487,8 +513,8 @@
         <div id="importMsg" style="margin-top:10px;"></div>
       </div>
     `;
-    document.getElementById('allProjectsBtn').addEventListener('click', () => navigate(''));
-    document.getElementById('importBtn').addEventListener('click', async () => {
+    on('allProjectsBtn', 'click', () => navigate(''));
+    on('importBtn', 'click', async () => {
       const fileInput = document.getElementById('importFile');
       const msg = document.getElementById('importMsg');
       if (!fileInput.files.length) { msg.textContent = 'Choose a file first.'; return; }
@@ -637,7 +663,7 @@
       </div>
     `;
 
-    document.getElementById('backBtn').addEventListener('click', () => navigate('/'));
+    on('backBtn', 'click', () => navigate('/'));
     root.querySelectorAll('.tool-tile').forEach((btn) => {
       btn.addEventListener('click', () => {
         const tool = TOOLS.find((t) => t.id === btn.dataset.tool);
@@ -716,7 +742,7 @@
 
     // Searching cuts straight to matching units from wherever you are —
     // hunting one unit shouldn't mean walking back down the hierarchy.
-    document.getElementById('searchBox').addEventListener('input', (e) => {
+    on('searchBox', 'input', (e) => {
       const term = e.target.value.trim();
       if (term) renderUnitGrid(currentUnits.filter((u) => u.unitNumber.toLowerCase().includes(term.toLowerCase())), '');
       else drawLevel();
@@ -768,8 +794,8 @@
       });
     }
 
-    document.getElementById('backBtn').addEventListener('click', () => navigate(backTarget));
-    if (canManage) document.getElementById('renameProjectBtn').addEventListener('click', async () => {
+    on('backBtn', 'click', () => navigate(backTarget));
+    if (canManage) on('renameProjectBtn', 'click', async () => {
       const newName = await showPrompt('Rename project', project.name, 'Save');
       if (!newName) return;
       try {
@@ -780,7 +806,7 @@
         toast(`Could not rename: ${err.message}`);
       }
     });
-    if (canManage) document.getElementById('reimportBtn').addEventListener('click', async () => {
+    if (canManage) on('reimportBtn', 'click', async () => {
       const ok = await showConfirm('This replaces the current unit list and all progress for this project. Continue?', 'Replace list');
       if (ok) {
         renderImportIntoProject(project);
@@ -819,7 +845,7 @@
       ${complete ? `<div class="card big-check"><div class="mark">&#10003;</div><div>Unit ${escapeHtml(unit.unitNumber)} complete</div></div>` : ''}
     `;
 
-    document.getElementById('backBtn').addEventListener('click', () => navigate(floorRouteFor(projectId, unit.unitNumber)));
+    on('backBtn', 'click', () => navigate(floorRouteFor(projectId, unit.unitNumber)));
 
     const list = document.getElementById('itemList');
     list.innerHTML = unit.items.map((item, idx) => `
@@ -836,7 +862,7 @@
       el.addEventListener('click', () => navigate(`/project/${projectId}/unit/${unitId}/scan/${el.dataset.idx}`));
     });
 
-    document.getElementById('startScanBtn').addEventListener('click', () => {
+    on('startScanBtn', 'click', () => {
       const firstPending = unit.items.findIndex((i) => i.status !== 'done');
       navigate(`/project/${projectId}/unit/${unitId}/scan/${firstPending === -1 ? 0 : firstPending}`);
     });
@@ -1281,7 +1307,7 @@
     // at native detail rather than at the downscaled size used for OCR.
     let fullPhoto = null;
 
-    document.getElementById('exitScan').addEventListener('click', (e) => {
+    on('exitScan', 'click', (e) => {
       e.preventDefault();
       cleanup();
       navigate(`/project/${projectId}/unit/${unitId}`);
@@ -1342,8 +1368,8 @@
       if (target) statusEl.textContent = `Tap the ${target.toUpperCase()} on the photo`;
     }
 
-    document.getElementById('fixModelBtn').addEventListener('click', () => setFixTarget(fixTarget === 'model' ? null : 'model'));
-    document.getElementById('fixSerialBtn').addEventListener('click', () => setFixTarget(fixTarget === 'serial' ? null : 'serial'));
+    on('fixModelBtn', 'click', () => setFixTarget(fixTarget === 'model' ? null : 'model'));
+    on('fixSerialBtn', 'click', () => setFixTarget(fixTarget === 'serial' ? null : 'serial'));
 
     function hideBoxes() {
       modelBox.hidden = true;
@@ -1432,12 +1458,12 @@
       }
     }
 
-    document.getElementById('skipBtn').addEventListener('click', async () => {
+    on('skipBtn', 'click', async () => {
       await saveItem(item.id, { status: 'skipped', scannedBy: scannedBy() });
       goToNext();
     });
 
-    document.getElementById('confirmBtn').addEventListener('click', async () => {
+    on('confirmBtn', 'click', async () => {
       const model = modelField.value.trim();
       const serial = serialField.value.trim();
 
@@ -2112,7 +2138,7 @@
         </div>
       </div>
     `;
-    document.getElementById('doneBtn').addEventListener('click', () => navigate(floorRouteFor(projectId, unitNumber)));
+    on('doneBtn', 'click', () => navigate(floorRouteFor(projectId, unitNumber)));
   }
 
   // ---------------- Commitments & billing (administrators only) ----------------
@@ -2182,13 +2208,13 @@
       </div>
     `;
 
-    document.getElementById('backBtn').addEventListener('click', () => navigate(`/project/${projectId}`));
+    on('backBtn', 'click', () => navigate(`/project/${projectId}`));
     (document.getElementById('commitmentRows') || { querySelectorAll: () => [] })
       .querySelectorAll('tr').forEach((tr) => {
         tr.addEventListener('click', () => navigate(`/project/${projectId}/commitment/${tr.dataset.id}`));
       });
 
-    document.getElementById('addCommitment').addEventListener('click', async () => {
+    on('addCommitment', 'click', async () => {
       const subCompany = document.getElementById('cSub').value.trim();
       if (!subCompany) { toast('Enter the subcontractor'); return; }
       try {
@@ -2247,11 +2273,19 @@
 
     const appRows = data.payApps.map((p) => `
       <tr class="clickable" data-app="${p.id}">
-        <td><strong>#${p.number}</strong></td>
+        <td><strong>#${p.number}</strong>${p.invoice_no ? `<div class="help">Inv. ${escapeHtml(p.invoice_no)}</div>` : ''}</td>
         <td>${escapeHtml(dateOnly(p.period_start))} &ndash; ${escapeHtml(dateOnly(p.period_end))}</td>
-        <td><span class="pill ${p.status}">${p.status.toUpperCase()}</span></td>
-        <td>${p.submitted_at ? new Date(p.submitted_at).toLocaleDateString() : '&mdash;'}</td>
+        <td><span class="pill ${p.status}">${statusLabel(p.status)}</span></td>
+        <td class="num">${money(p.thisPeriod)}</td>
+        <td class="num">${money(p.retainage)}</td>
+        <td class="num"><strong>${money(p.currentPaymentDue)}</strong></td>
       </tr>`).join('');
+
+    const appTotals = data.payApps.reduce((t, p) => ({
+      thisPeriod: t.thisPeriod + Number(p.thisPeriod || 0),
+      retainage: t.retainage + Number(p.retainage || 0),
+      due: t.due + Number(p.currentPaymentDue || 0),
+    }), { thisPeriod: 0, retainage: 0, due: 0 });
 
     root.innerHTML = `
       <div class="row between">
@@ -2339,9 +2373,17 @@
         <h2 style="margin-top:0;">Pay applications</h2>
         ${data.payApps.length ? `
           <table class="grid">
-            <thead><tr><th>App</th><th>Period</th><th>Status</th><th>Submitted</th></tr></thead>
+            <thead><tr><th>App</th><th>Period</th><th>Status</th><th class="num">This period</th><th class="num">Retainage held</th><th class="num">Payment due</th></tr></thead>
             <tbody id="appRows">${appRows}</tbody>
-          </table>` : '<p class="help">No applications yet.</p>'}
+            <tfoot><tr>
+              <td colspan="3"><strong>Billed to date</strong></td>
+              <td class="num"><strong>${money(appTotals.thisPeriod)}</strong></td>
+              <td class="num help">running total</td>
+              <td class="num"><strong>${money(appTotals.due)}</strong></td>
+            </tr></tfoot>
+          </table>
+          <p class="help" style="margin-top:8px;">Click any application to open it. Anything not yet approved can still be edited.</p>`
+          : '<p class="help">No applications yet.</p>'}
         ${base.length ? `
           <div class="field-grid" style="margin-top:14px;">
             <label>PERIOD FROM<input type="date" id="pStart" /></label>
@@ -2399,7 +2441,7 @@
       });
     });
 
-    document.getElementById('backBtn').addEventListener('click', () => navigate(`/project/${projectId}/commitments`));
+    on('backBtn', 'click', () => navigate(`/project/${projectId}/commitments`));
 
     const sovFile = document.getElementById('sovFile');
     if (sovFile) {
@@ -2450,7 +2492,7 @@
             </div>
           </div>`;
 
-        document.getElementById('saveImported').addEventListener('click', async () => {
+        on('saveImported', 'click', async () => {
           try {
             await api(`/api/commitments/${commitmentId}/sov`, { method: 'PUT', body: JSON.stringify({ lines: found.lines }) });
             toast(`Saved ${found.lines.length} lines`);
@@ -2480,7 +2522,7 @@
           lines.length ? `${lines.length} lines, ${money(total)}` : '';
       });
 
-      document.getElementById('saveSov').addEventListener('click', async () => {
+      on('saveSov', 'click', async () => {
         const lines = parseSov();
         if (!lines.length) { toast('Nothing recognised — three columns: item, description, value'); return; }
         try {
@@ -2503,7 +2545,7 @@
       });
     }
 
-    document.getElementById('addCo').addEventListener('click', async () => {
+    on('addCo', 'click', async () => {
       const title = document.getElementById('coTitle').value.trim();
       if (!title) { toast('Give the change order a title'); return; }
       try {
@@ -2738,8 +2780,8 @@
       </div>
     `;
 
-    document.getElementById('backBtn').addEventListener('click', () => navigate(`/project/${projectId}/commitment/${commitmentId}/changes`));
-    document.getElementById('exportPdf').addEventListener('click', () => {
+    on('backBtn', 'click', () => navigate(`/project/${projectId}/commitment/${commitmentId}/changes`));
+    on('exportPdf', 'click', () => {
       window.open(`/api/change-orders/${changeOrderId}/pdf`, '_blank');
     });
 
@@ -2849,13 +2891,6 @@
       } catch (e) { toast(e.message); }
     });
 
-    document.getElementById('pdfApp').addEventListener('click', () => {
-      window.open(`/api/pay-apps/${payAppId}/pdf/application`, '_blank');
-    });
-    document.getElementById('pdfWaiver').addEventListener('click', () => {
-      window.open(`/api/pay-apps/${payAppId}/pdf/waiver`, '_blank');
-    });
-
     const approve = document.getElementById('approve');
     if (approve) approve.addEventListener('click', async () => {
       const ok = await showConfirm(
@@ -2891,7 +2926,7 @@
       } catch (e) { toast(e.message); }
     });
 
-    document.getElementById('deleteCo').addEventListener('click', async () => {
+    on('deleteCo', 'click', async () => {
       const ok = await showConfirm(
         `Delete ${co.number} (${money(s.thisChangeOrder)})? Its line items and attachments go with it. This can't be undone.`,
         'Delete');
@@ -3025,12 +3060,21 @@
             ${p.status === 'approved'
               ? `<button class="secondary" id="reopen">Reopen for changes</button>`
               : `<button class="go-btn" id="approve">Approve application</button>`}
+            ${p.status === 'submitted'
+              ? `<button class="secondary" id="sendBack">Send back to ${escapeHtml(c.sub_company)}&hellip;</button>`
+              : ''}
           </span>
           <span class="row" style="gap:8px;">
             <button class="secondary" id="pdfApp">Pay application PDF</button>
             <button class="secondary" id="pdfWaiver">Conditional waiver PDF</button>
           </span>
         </div>
+        ${p.status === 'revise' && p.revise_note
+          ? `<p class="help" style="margin-top:10px;">Sent back for revision &mdash; &ldquo;${escapeHtml(p.revise_note)}&rdquo;. Their link is live again and they can resubmit.</p>`
+          : ''}
+        ${p.status === 'approved'
+          ? `<p class="help" style="margin-top:10px;">Approved${p.approved_by ? ` by ${escapeHtml(p.approved_by)}` : ''}${p.approved_at ? ` on ${new Date(p.approved_at).toLocaleDateString()}` : ''}. Figures are locked; reopen to change anything.</p>`
+          : ''}
       </div>
 
       ${canManage ? `
@@ -3073,7 +3117,9 @@
       </div>` : ''}
     `;
 
-    document.getElementById('backBtn').addEventListener('click', () => navigate(`/project/${projectId}/commitment/${commitmentId}`));
+    on('backBtn', 'click', () => navigate(`/project/${projectId}/commitment/${commitmentId}`));
+    on('pdfApp', 'click', () => window.open(`/api/pay-apps/${payAppId}/pdf/application`, '_blank'));
+    on('pdfWaiver', 'click', () => window.open(`/api/pay-apps/${payAppId}/pdf/waiver`, '_blank'));
 
     const copyBtn = document.getElementById('copyLink');
     if (copyBtn) copyBtn.addEventListener('click', async () => {
@@ -3109,6 +3155,21 @@
       try {
         await api(`/api/pay-apps/${payAppId}`, { method: 'PATCH', body: JSON.stringify({ status: 'approved' }) });
         toast('Approved');
+        renderPayApp(projectId, commitmentId, payAppId);
+      } catch (e) { toast(e.message); }
+    });
+
+    on('sendBack', 'click', async () => {
+      const why = await showPrompt(
+        `Send application #${p.number} back to ${c.sub_company}? Tell them what needs changing — they'll see it on their page and their link starts working again.`,
+        '', 'Send back');
+      if (why === null) return;
+      try {
+        await api(`/api/pay-apps/${payAppId}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ status: 'revise', reviseNote: why }),
+        });
+        toast('Sent back for revision');
         renderPayApp(projectId, commitmentId, payAppId);
       } catch (e) { toast(e.message); }
     });

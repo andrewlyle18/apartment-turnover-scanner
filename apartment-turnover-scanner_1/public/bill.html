@@ -105,7 +105,7 @@
   }
 
   function render() {
-    const open = data.payApp.status === 'open';
+    const open = ['open', 'revise'].includes(data.payApp.status);
     const c = data.commitment;
     const p = data.payApp;
 
@@ -147,7 +147,11 @@
         <td class="num">${money(totals.balanceToFinish)}</td>
       </tr>` : '';
 
-    const banner = open
+    const banner = data.payApp.status === 'revise'
+      ? `<div class="banner warn"><strong>${escapeHtml(c.contractorName)} sent this back for a change.</strong>
+           ${p.reviseNote ? `&ldquo;${escapeHtml(p.reviseNote)}&rdquo;` : ''}
+           Update the lines below, then sign and submit again.</div>`
+      : open
       ? `<div class="banner warn">Fill in what you completed this period, then sign and submit at the bottom.
            Type either a percent or a dollar amount on each line &mdash; the other updates itself.</div>`
       : `<div class="banner done">Submitted${p.submittedAt ? ` on ${new Date(p.submittedAt).toLocaleDateString()}` : ''}${p.signerName ? ` by ${escapeHtml(p.signerName)}` : ''}.
@@ -221,7 +225,7 @@
 
   function renderSummary() {
     const s = data.summary;
-    const open = data.payApp.status === 'open';
+    const open = ['open', 'revise'].includes(data.payApp.status);
     let bar = document.querySelector('.summary');
     if (!bar) {
       bar = document.createElement('div');
