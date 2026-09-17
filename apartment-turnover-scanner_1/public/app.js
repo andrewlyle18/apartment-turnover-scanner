@@ -3049,6 +3049,13 @@
           </label>
           <button class="secondary" id="savePrior">Save</button>
         </div>
+        ${p.status !== 'approved' ? `
+        <div style="margin-top:16px; padding-top:14px; border-top:1px solid #e6e6e6;">
+          <button class="secondary" id="resyncPrev">Re-read previous completed</button>
+          <p class="help" style="margin-top:8px;">Use this after recording an earlier application. Work this one counted as
+            <em>this period</em> moves into <em>previous</em> where the earlier application already billed it. Totals
+            don't change &mdash; only which period they fall in.</p>
+        </div>` : ''}
       </div>
 
       <div class="card danger-zone">
@@ -3123,6 +3130,17 @@
           }),
         });
         toast('Saved');
+        renderPayApp(projectId, commitmentId, payAppId);
+      } catch (e) { toast(e.message); }
+    });
+
+    const resync = document.getElementById('resyncPrev');
+    if (resync) resync.addEventListener('click', async () => {
+      try {
+        const result = await api(`/api/pay-apps/${payAppId}/resync-previous`, { method: 'POST' });
+        toast(result.linesChanged
+          ? `${result.linesChanged} line${result.linesChanged === 1 ? '' : 's'} moved into previous`
+          : 'Already in step with the application before it');
         renderPayApp(projectId, commitmentId, payAppId);
       } catch (e) { toast(e.message); }
     });
