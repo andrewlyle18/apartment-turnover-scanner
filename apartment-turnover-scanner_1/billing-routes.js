@@ -715,6 +715,43 @@ function mountBillingRoutes(app, { adminOnly, upload }) {
     res.json({ ok: true, linesChanged: moved.rowCount, ...(await applicationView(id)) });
   });
 
+  /**
+   * Take a line off ONE application. The schedule of values keeps it — this
+   * only says the line wasn't part of what was billed in this period, which is
+   * what a backfilled application needs: a change order approved in September
+   * was not in the contract sum on a July document, and printing it there
+   * overstates lines 2, 3 and 9.
+   *
+   * Only ever a line with nothing billed against it, so no money can vanish.
+   */
+  app.delete('/api/pay-apps/:id/lines/:lineId', adminOnly, async (req, res) => {
+    const payAppId = parseInt(req.params.id, 10);
+    const lineId = parseInt(req.params.lineId, 10);
+
+    const app_ = await pool.query('SELECT status FROM pay_apps WHERE id = $1', [payAppId]);
+    if (!app_.rows.length) return res.status(404).json({ error: 'Application not found' });
+    if (app_.rows[0].status === 'approved') {
+      return res.status(409).json({ error: 'This application is approved. Reopen it first.' });
+    }
+
+    const line = await pool.query(
+      `SELECT l.previous_completed, l.this_period, l.materials_stored, s.description
+       FROM pay_app_lines l JOIN sov_lines s ON s.id = l.sov_line_id
+       WHERE l.id = $1 AND l.pay_app_id = $2`,
+      [lineId, payAppId]
+    );
+    if (!line.rows.length) return res.status(404).json({ error: 'Line not found on this application' });
+    const { previous_completed: prev, this_period: now_, materials_stored: stored, description } = line.rows[0];
+    if (Number(prev) || Number(now_) || Number(stored)) {
+      return res.status(409).json({
+        error: `"${description}" has money billed against it. Zero it first if it really doesn't belong here.`,
+      });
+    }
+
+    await pool.query('DELETE FROM pay_app_lines WHERE id = $1 AND pay_app_id = $2', [lineId, payAppId]);
+    res.json(await applicationView(payAppId));
+  });
+
   app.patch('/api/pay-apps/:id', adminOnly, async (req, res) => {
     const id = parseInt(req.params.id, 10);
     const b = req.body || {};
