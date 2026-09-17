@@ -820,6 +820,11 @@ function mountBillingRoutes(app, { adminOnly, upload }) {
       if (b.status === 'revise') {
         set('revise_note', trim(b.reviseNote) || null);
         set('submitted_at', null);
+      } else {
+        // The note belongs to one trip back to the sub. Once the application
+        // moves on it is answered, and leaving it behind would put stale words
+        // in front of them the next time anything is sent back.
+        set('revise_note', null);
       }
       if (b.status === 'approved') {
         set('approved_at', new Date());
