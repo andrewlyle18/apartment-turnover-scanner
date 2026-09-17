@@ -174,6 +174,7 @@ const CO_EXTRA_COLUMNS = `
 const PAY_APP_EXTRA_COLUMNS = `
   ALTER TABLE pay_apps ADD COLUMN IF NOT EXISTS prior_payment_adjustment NUMERIC(14,2) NOT NULL DEFAULT 0;
   ALTER TABLE pay_apps ADD COLUMN IF NOT EXISTS prior_payment_note TEXT;
+  ALTER TABLE pay_apps ADD COLUMN IF NOT EXISTS revise_note TEXT;
 `;
 
 async function initBilling() {

@@ -89,14 +89,32 @@ function mountBillingRoutes(app, { adminOnly, upload }) {
     );
     const payApps = await pool.query(
       `SELECT id, number, invoice_no, period_start, period_end, status, submitted_at,
-              approved_at, (token IS NOT NULL) AS has_link, token_expires
+              approved_at, approved_by, signer_name, revise_note,
+              (token IS NOT NULL) AS has_link, token_expires
        FROM pay_apps WHERE commitment_id = $1 ORDER BY number DESC`, [id]
     );
+
+    // The list is worth nothing without the money on it — "which invoice was
+    // the $11,596.28 one" is the question people actually arrive with. Each
+    // row carries the same figures its own page and PDF show, from the same
+    // calculation, so the list can never quietly disagree with the document.
+    const withTotals = [];
+    for (const row of payApps.rows) {
+      const view = await applicationView(row.id);
+      withTotals.push({
+        ...row,
+        thisPeriod: view ? view.grand.thisPeriod : 0,
+        totalCompleted: view ? view.summary.totalCompletedAndStored : 0,
+        retainage: view ? view.summary.totalRetainage : 0,
+        currentPaymentDue: view ? view.summary.currentPaymentDue : 0,
+      });
+    }
+
     res.json({
       commitment: commitment.rows[0],
       sovLines: sov.rows,
       changeOrders: changeOrders.rows,
-      payApps: payApps.rows,
+      payApps: withTotals,
     });
   });
 
@@ -792,10 +810,17 @@ function mountBillingRoutes(app, { adminOnly, upload }) {
     if (b.priorPaymentNote !== undefined) set('prior_payment_note', trim(b.priorPaymentNote) || null);
 
     if (b.status !== undefined) {
-      if (!['open', 'submitted', 'approved'].includes(b.status)) {
+      // The states a subcontractor invoice actually moves through, same shape
+      // as Procore's: draft while it's being filled in, under review once the
+      // sub signs and sends it, back to them to fix, or approved.
+      if (!['open', 'submitted', 'revise', 'approved'].includes(b.status)) {
         return res.status(400).json({ error: 'Unknown status' });
       }
       set('status', b.status);
+      if (b.status === 'revise') {
+        set('revise_note', trim(b.reviseNote) || null);
+        set('submitted_at', null);
+      }
       if (b.status === 'approved') {
         set('approved_at', new Date());
         set('approved_by', req.user ? (req.user.name || req.user.email) : 'admin');
@@ -932,6 +957,9 @@ function mountBillingRoutes(app, { adminOnly, upload }) {
         periodEnd: view.payApp.period_end,
         applicationDate: view.payApp.application_date,
         status: view.payApp.status,
+        // What we asked them to change. They need to read it — it's the whole
+        // reason the page is open to them again.
+        reviseNote: view.payApp.revise_note,
         signerName: view.payApp.signer_name,
         signerTitle: view.payApp.signer_title,
         submittedAt: view.payApp.submitted_at,
@@ -956,7 +984,9 @@ function mountBillingRoutes(app, { adminOnly, upload }) {
     if (!id) return res.status(404).json({ error: 'This link is no longer valid. Ask for a new one.' });
 
     const current = await pool.query('SELECT status FROM pay_apps WHERE id = $1', [id]);
-    if (current.rows[0].status !== 'open') {
+    // 'revise' means we sent it back to them on purpose — that is exactly when
+    // they need the page to be editable again.
+    if (!['open', 'revise'].includes(current.rows[0].status)) {
       return res.status(409).json({ error: 'This application has been submitted. Ask for it to be reopened if something needs changing.' });
     }
 
