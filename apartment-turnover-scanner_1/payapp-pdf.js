@@ -2,19 +2,24 @@ const fs = require('fs');
 const path = require('path');
 const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
 
-// The two documents a subcontractor's progress payment needs: the application
-// for payment with its continuation sheet, and the conditional waiver.
+// The subcontractor's progress payment pack: AIA-style G702 application,
+// G703 continuation sheets, and the conditional waiver, in one file.
 //
-// Both are drawn from the same stored figures as the screens, so the period
-// dates, the company name and the amount can never disagree between them —
-// which is exactly what went wrong on the pack we started from.
+// Every figure comes from the same stored calculation the screens read, so the
+// period dates, the company name and the amount cannot disagree between the
+// three documents — which is exactly what went wrong on the pack we started
+// from, where the waiver covered a different period than the application.
+//
+// Landscape letter throughout, matching the workbook this replaces: nine money
+// columns do not fit across a portrait page without lying about the spacing.
 
-const PAGE = { width: 612, height: 792 };
-const MARGIN = 40;
-const RIGHT = PAGE.width - MARGIN;
+const SHEET = { width: 792, height: 612 };   // letter, landscape
+const MARGIN = 28;
+const RIGHT = SHEET.width - MARGIN;
 const INK = rgb(0.05, 0.08, 0.1);
 const GREY = rgb(0.42, 0.46, 0.5);
 const RULE = rgb(0.72, 0.76, 0.79);
+const HAIR = rgb(0.85, 0.88, 0.9);
 const BAND = rgb(0.94, 0.95, 0.96);
 
 const logoPath = path.join(__dirname, 'assets', 'precision-logo.png');
@@ -22,7 +27,7 @@ const logoPath = path.join(__dirname, 'assets', 'precision-logo.png');
 const money = (value) =>
   `$${Number(value || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
-const percent = (value) => `${(Number(value || 0) * 100).toFixed(1)}%`;
+const pct1 = (value) => `${(Number(value || 0) * 100).toFixed(0)}%`;
 
 const asDate = (value) => {
   if (!value) return '';
@@ -52,6 +57,14 @@ function wrap(text, font, size, maxWidth) {
   return lines;
 }
 
+/** Trim a description to fit its column rather than letting it run into the money. */
+function clip(text, font, size, maxWidth) {
+  let s = String(text || '');
+  if (font.widthOfTextAtSize(s, size) <= maxWidth) return s;
+  while (s.length > 1 && font.widthOfTextAtSize(`${s}…`, size) > maxWidth) s = s.slice(0, -1);
+  return `${s}…`;
+}
+
 async function newDocument() {
   const pdf = await PDFDocument.create();
   const regular = await pdf.embedFont(StandardFonts.Helvetica);
@@ -63,255 +76,442 @@ async function newDocument() {
     logo = null;
   }
 
-  const page = (landscape = false) => {
-    const p = pdf.addPage(landscape ? [PAGE.height, PAGE.width] : [PAGE.width, PAGE.height]);
-    const text = (value, x, y, { size = 9, font = regular, color = INK, align = 'left' } = {}) => {
-      const width = font.widthOfTextAtSize(String(value), size);
+  const page = () => {
+    const p = pdf.addPage([SHEET.width, SHEET.height]);
+    const text = (value, x, y, { size = 8, font = regular, color = INK, align = 'left' } = {}) => {
+      const str = String(value === null || value === undefined ? '' : value);
+      if (!str) return;
+      const width = font.widthOfTextAtSize(str, size);
       const left = align === 'right' ? x - width : align === 'center' ? x - width / 2 : x;
-      p.drawText(String(value), { x: left, y, size, font, color });
+      p.drawText(str, { x: left, y, size, font, color });
     };
-    const line = (x1, y, x2, thickness = 0.7, color = RULE) =>
+    const line = (x1, y, x2, thickness = 0.6, color = RULE) =>
       p.drawLine({ start: { x: x1, y }, end: { x: x2, y }, thickness, color });
-    const box = (x, y, w, h, { fill = null, border = RULE, width = 0.7 } = {}) =>
+    const vline = (x, y1, y2, thickness = 0.6, color = RULE) =>
+      p.drawLine({ start: { x, y: y1 }, end: { x, y: y2 }, thickness, color });
+    const box = (x, y, w, h, { fill = null, border = RULE, width = 0.6 } = {}) =>
       p.drawRectangle({ x, y, width: w, height: h, color: fill || undefined, borderColor: border, borderWidth: width });
-    return { p, text, line, box };
+    return { p, text, line, vline, box };
   };
 
   return { pdf, regular, bold, logo, page };
 }
 
-/** The application for payment, with its continuation sheet. */
-async function buildApplicationPdf(view, project) {
-  const { payApp, commitment, lines, base, changeOrders, grand, summary } = view;
-  const { pdf, regular, bold, logo, page } = await newDocument();
+// ---------------------------------------------------------------------------
+// G703 continuation sheet geometry
+// ---------------------------------------------------------------------------
 
-  const period = [asDate(payApp.period_start), asDate(payApp.period_end)].filter(Boolean).join(' – ');
+// Right edge of each money column, and the left edge of the two text columns.
+// The lettering is the standard one: A item, B description, C scheduled value,
+// D previously completed, E this period, F stored, G total, then the unlettered
+// per-cent column, H balance to finish, I retainage.
+const COL = {
+  item: { x: MARGIN + 4, align: 'left', width: 62 },
+  description: { x: MARGIN + 74, align: 'left', width: 198 },
+  scheduled: { x: 352, align: 'right' },
+  previous: { x: 422, align: 'right' },
+  thisPeriod: { x: 488, align: 'right' },
+  stored: { x: 548, align: 'right' },
+  total: { x: 620, align: 'right' },
+  percent: { x: 656, align: 'right' },
+  // These last two need real daylight between them: right-aligned headers
+  // ("BALANCE TO FINISH", "RETAINAGE") ran together when they shared an edge.
+  balance: { x: 706, align: 'right' },
+  retainage: { x: RIGHT - 2, align: 'right' },
+};
+// Vertical rules sit between columns, not through them.
+const DIVIDERS = [MARGIN + 70, 278, 358, 428, 494, 554, 626, 662, 712];
 
-  // ---------- Page 1: the application ----------
-  const a = page();
-  let y = PAGE.height - MARGIN;
+const ROW_H = 12.4;
+const HEADER_H = 54;
 
-  if (logo) {
-    const w = 120;
-    const h = (logo.height / logo.width) * w;
-    a.p.drawImage(logo, { x: MARGIN, y: y - h + 4, width: w, height: h });
-  }
-  a.text('APPLICATION AND CERTIFICATE FOR PAYMENT', RIGHT, y - 8, { size: 13, font: bold, align: 'right' });
-  a.text(`Application No. ${payApp.number}`, RIGHT, y - 24, { size: 10, align: 'right' });
-  if (payApp.invoice_no) a.text(`Invoice No. ${payApp.invoice_no}`, RIGHT, y - 37, { size: 9, align: 'right' });
+function sheetHeader(ctx, { pageNumber, pageCount, payApp, project, retainageRate }) {
+  const { text, line } = ctx;
+  let y = SHEET.height - MARGIN - 8;
 
-  y -= 62;
-  a.line(MARGIN, y, RIGHT, 1.2, INK);
-  y -= 16;
+  text('CONTINUATION SHEET', MARGIN, y, { size: 10, font: ctx.bold });
+  text('DOCUMENT G703', SHEET.width / 2, y, { size: 9, font: ctx.bold, align: 'center' });
+  text(`Page ${pageNumber} of ${pageCount}`, RIGHT, y, { size: 9, align: 'right' });
+  y -= 11;
+  text('Document G702, APPLICATION AND CERTIFICATE FOR PAYMENT, containing', MARGIN, y, { size: 7, color: GREY });
+  text(`APPLICATION NUMBER: ${payApp.number}`, 470, y, { size: 8 });
+  y -= 9.5;
+  text("Contractor's signed Certification is attached.", MARGIN, y, { size: 7, color: GREY });
+  text(`APPLICATION DATE: ${asDate(payApp.application_date) || asDate(payApp.submitted_at)}`, 470, y, { size: 8 });
+  y -= 9.5;
+  text('Use Column I on Contracts where variable retainage for line items may apply.', MARGIN, y, { size: 7, color: GREY });
+  text(`PERIOD: ${[asDate(payApp.period_start), asDate(payApp.period_end)].filter(Boolean).join(' – ')}`,
+    470, y, { size: 8 });
+  y -= 9.5;
+  text(`ARCHITECT'S PROJECT NO: ${project.name || ''}`, 470, y, { size: 8 });
+  text(`Retainage: ${(Number(retainageRate || 0) * 100).toFixed(2)}%`, MARGIN, y, { size: 7, color: GREY });
 
-  // Parties
-  const col2 = MARGIN + 270;
-  const pair = (label, value, x, yy) => {
-    a.text(label, x, yy, { size: 7.5, color: GREY });
-    a.text(value || '', x, yy - 11, { size: 9.5 });
+  return y - 8;
+}
+
+/** The lettered column band plus the stacked column titles. */
+function columnHeader(ctx, top) {
+  const { text, line, box, vline } = ctx;
+  const letterRow = top - 9;
+  const headTop = letterRow - 3;
+  const headBottom = headTop - HEADER_H;
+
+  box(MARGIN, headBottom, RIGHT - MARGIN, HEADER_H + 13, { fill: BAND, border: RULE });
+
+  const letters = [
+    ['A', COL.item.x + 20], ['B', 170], ['C', COL.scheduled.x - 30], ['D', COL.previous.x - 28],
+    ['E', COL.thisPeriod.x - 26], ['F', COL.stored.x - 24], ['G', COL.total.x - 30],
+    ['H', COL.balance.x - 20], ['I', COL.retainage.x - 22],
+  ];
+  for (const [letter, x] of letters) text(letter, x, letterRow, { size: 6.5, color: GREY, align: 'center' });
+
+  const stack = (lines, col, size = 5.8) => {
+    let yy = headTop - 9;
+    for (const l of lines) {
+      text(l, col.x, yy, { size, font: ctx.bold, align: col.align === 'right' ? 'right' : 'left' });
+      yy -= 6.6;
+    }
   };
-  pair('TO CONTRACTOR:', commitment.contractor_name, MARGIN, y);
-  pair('PROJECT:', project.name, col2, y);
-  a.text(commitment.contractor_address1 || '', MARGIN, y - 22, { size: 9 });
-  a.text(project.address1 || '', col2, y - 22, { size: 9 });
-  a.text(commitment.contractor_address2 || '', MARGIN, y - 33, { size: 9 });
-  a.text(project.address2 || '', col2, y - 33, { size: 9 });
 
-  y -= 54;
-  pair('FROM SUBCONTRACTOR:', commitment.sub_company, MARGIN, y);
-  pair('PERIOD:', period, col2, y);
-  a.text(commitment.sub_address1 || '', MARGIN, y - 22, { size: 9 });
-  a.text(`SUBCONTRACT NO: ${commitment.number || ''}`, col2, y - 22, { size: 9 });
-  a.text(commitment.sub_address2 || '', MARGIN, y - 33, { size: 9 });
-  a.text(`SUBCONTRACT FOR: ${commitment.title || ''}`, col2, y - 33, { size: 9 });
+  stack(['ITEM NO.'], COL.item, 6.2);
+  stack(['DESCRIPTION OF WORK'], COL.description, 6.2);
+  stack(['SCHEDULED', 'VALUE'], COL.scheduled, 6.2);
+  stack(['WORK COMPLETED', 'FROM PREVIOUS', 'APPLICATION (D + E)'], COL.previous, 5.5);
+  // Short header lines only: a long right-aligned title runs into its
+  // neighbour's column long before the numbers underneath ever would.
+  stack(['WORK', 'COMPLETED', 'THIS PERIOD'], COL.thisPeriod);
+  stack(['MATERIALS', 'PRESENTLY', 'STORED', '(NOT IN D OR E)'], COL.stored, 5.4);
+  stack(['TOTAL COMPLETED', 'AND STORED', 'TO DATE (D+E+F)'], COL.total, 5.5);
+  stack(['%', '(G / C)'], COL.percent);
+  stack(['BALANCE TO', 'FINISH', '(C - G)'], COL.balance, 5.6);
+  stack(['RETAINAGE'], COL.retainage, 5.8);
 
-  y -= 52;
-  a.line(MARGIN, y, RIGHT, 1.2, INK);
+  for (const x of DIVIDERS) vline(x, headBottom, headTop + 13, 0.6, RULE);
+  line(MARGIN, headBottom, RIGHT, 0.9, RULE);
+  return headBottom;
+}
+
+function drawRow(ctx, y, row) {
+  const { text, line, vline, box } = ctx;
+  const font = row.kind === 'total' || row.kind === 'grand' ? ctx.bold : ctx.regular;
+  const size = row.kind === 'grand' ? 8 : 7.6;
+
+  if (row.kind === 'section') {
+    box(MARGIN, y - 3, RIGHT - MARGIN, ROW_H, { fill: BAND, border: HAIR });
+    text(row.label, COL.item.x, y + 1, { size: 7.4, font: ctx.bold });
+    return y - ROW_H;
+  }
+  if (row.kind === 'spacer') return y - ROW_H / 2;
+
+  if (row.kind === 'total' || row.kind === 'grand') line(MARGIN, y + ROW_H - 4, RIGHT, 0.8, RULE);
+
+  text(row.itemNo || '', COL.item.x, y + 1, { size, font });
+  text(clip(row.description, font, size, COL.description.width), COL.description.x, y + 1, { size, font });
+  const cell = (key, value) => text(value, COL[key].x, y + 1, { size, font, align: 'right' });
+  cell('scheduled', money(row.scheduledValue));
+  cell('previous', money(row.previousCompleted));
+  cell('thisPeriod', money(row.thisPeriod));
+  cell('stored', money(row.materialsStored));
+  cell('total', money(row.totalCompleted));
+  cell('percent', pct1(row.percent));
+  cell('balance', money(row.balanceToFinish));
+  cell('retainage', money(row.retainage));
+
+  if (row.kind !== 'total' && row.kind !== 'grand') line(MARGIN, y - 3, RIGHT, 0.4, HAIR);
+  for (const x of DIVIDERS) vline(x, y - 3, y + ROW_H - 3, 0.4, HAIR);
+  return y - ROW_H;
+}
+
+/** Everything the continuation sheets have to print, in order. */
+function continuationRows(view) {
+  const rows = [];
+  const baseLines = view.lines.filter((l) => l.source !== 'co');
+  const coLines = view.lines.filter((l) => l.source === 'co');
+
+  rows.push({ kind: 'section', label: 'CONTRACT LINES' });
+  for (const l of baseLines) rows.push({ ...l, kind: 'line' });
+  rows.push({ ...view.base, kind: 'total', description: 'TOTALS:', itemNo: '' });
+
+  if (coLines.length) {
+    rows.push({ kind: 'spacer' });
+    rows.push({ kind: 'section', label: 'WHOLE CHANGE ORDER PACKAGES' });
+    for (const l of coLines) rows.push({ ...l, kind: 'line' });
+    rows.push({ ...view.changeOrders, kind: 'total', description: 'TOTALS:', itemNo: '' });
+  }
+
+  rows.push({ kind: 'spacer' });
+  rows.push({ ...view.grand, kind: 'grand', description: 'GRAND TOTALS', itemNo: '' });
+  return rows;
+}
+
+// ---------------------------------------------------------------------------
+// G702
+// ---------------------------------------------------------------------------
+
+function drawG702(ctx, { view, project, pageCount }) {
+  const { payApp, commitment, summary } = view;
+  const { text, line, box, vline } = ctx;
+  let y = SHEET.height - MARGIN - 6;
+
+  text('APPLICATION AND CERTIFICATE FOR PAYMENT', MARGIN, y, { size: 11, font: ctx.bold });
+  text('DOCUMENT G702', SHEET.width / 2 + 60, y, { size: 9, font: ctx.bold, align: 'center' });
+  text(`Page 1 of ${pageCount}`, RIGHT, y, { size: 9, align: 'right' });
+  y -= 6;
+  line(MARGIN, y, RIGHT, 0.9, RULE);
+  y -= 14;
+
+  const C1 = MARGIN;
+  const C2 = 280;
+  const C3 = 496;
+  const C4 = 668;
+  const label = (t, x, yy) => text(t, x, yy, { size: 7, color: GREY });
+  const value = (t, x, yy, size = 8.5) => text(t, x, yy, { size, font: ctx.bold });
+
+  let ly = y;
+  label('TO CONTRACTOR:', C1, ly);
+  label('PROJECT:', C2, ly);
+  label('APPLICATION NO:', C3, ly);
+  value(payApp.number, C3 + 90, ly);
+  label('DISTRIBUTION TO:', C4, ly);
+  ly -= 11;
+  value(commitment.contractor_name || '', C1, ly);
+  value(project.name || '', C2, ly);
+  label('INVOICE NO:', C3, ly);
+  value(payApp.invoice_no || '', C3 + 90, ly);
+  ly -= 11;
+  text(commitment.contractor_address1 || '', C1, ly, { size: 8 });
+  text(project.address1 || '', C2, ly, { size: 8 });
+  label('PERIOD:', C3, ly);
+  value([asDate(payApp.period_start), asDate(payApp.period_end)].filter(Boolean).join(' – '), C3 + 90, ly, 8);
+  ly -= 11;
+  text(commitment.contractor_address2 || '', C1, ly, { size: 8 });
+  text(project.address2 || '', C2, ly, { size: 8 });
+  label('SUBCONTRACT NO:', C3, ly);
+  value(commitment.number || '', C3 + 90, ly);
+  ly -= 11;
+  label('PROJECT NO:', C3, ly);
+  value(project.name || '', C3 + 90, ly, 8);
+
+  ly -= 16;
+  label('FROM SUBCONTRACTOR:', C1, ly);
+  label('SUBCONTRACT DATE:', C2, ly);
+  value(asDate(commitment.contract_date), C2 + 88, ly, 8);
+  ly -= 11;
+  value(commitment.sub_company || '', C1, ly);
+  ly -= 11;
+  text(commitment.sub_address1 || '', C1, ly, { size: 8 });
+  ly -= 11;
+  text(commitment.sub_address2 || '', C1, ly, { size: 8 });
+  ly -= 15;
+  text(`SUBCONTRACT FOR: ${commitment.title || ''}`, C1, ly, { size: 8.5, font: ctx.bold });
+
+  y = ly - 16;
+  line(MARGIN, y, RIGHT, 0.9, RULE);
+  y -= 14;
+
+  // Left half: the draw request and the nine numbered lines.
+  const LEFT_W = 396;
+  text("SUBCONTRACTOR'S DRAW REQUEST", C1, y, { size: 9, font: ctx.bold });
+  let ry = y;
+  const certification = [
+    "The undersigned Subcontractor certifies that to the best of the Subcontractor's knowledge,",
+    'information and belief the Work covered by this Application for Payment has been',
+    'completed in accordance with the Subcontract Documents, that all amounts have been paid by',
+    'the Contractor for Work for which previous Certificates for Payment were issued and',
+    'payments received from the Owner, and that current payment shown herein is now due.',
+  ];
+  for (const row of certification) {
+    text(row, C3 - 26, ry, { size: 7 });
+    ry -= 9;
+  }
+
+  y -= 11;
+  text('Application is made for payment, as shown below, in connection with the Subcontract.', C1, y, { size: 7.4, color: GREY });
+  y -= 9;
+  text('Continuation Sheet is attached.', C1, y, { size: 7.4, color: GREY });
   y -= 18;
 
-  a.text("SUBCONTRACTOR'S DRAW REQUEST", MARGIN, y, { size: 9.5, font: bold });
-  y -= 12;
-  a.text('Application is made for payment, as shown below, in connection with the Subcontract. Continuation sheet is attached.',
-    MARGIN, y, { size: 8, color: GREY });
-  y -= 20;
-
-  // The nine lines, as they are on every application for payment.
-  const rows = [
-    ['1.', 'Original contract sum', summary.originalContractSum],
-    ['2.', 'Net change by change orders', summary.netChangeByChangeOrders],
-    ['3.', 'Contract sum to date (line 1 ± 2)', summary.contractSumToDate],
-    ['4.', 'Total completed and stored to date', summary.totalCompletedAndStored],
-    // The rate printed here is what retainage ACTUALLY came to across every
-    // line billed, not the contract rate. Where retainage was waived on a
-    // change order the two differ, and the document should say the true one.
-    ['5.', `Retainage (${percent(summary.effectiveRetainageRate)} of completed work)`, summary.totalRetainage],
-    ['6.', 'Total earned less retainage (line 4 less line 5)', summary.totalEarnedLessRetainage],
-    ['7.', 'Less previous certificates for payment', summary.previousCertificates],
-    ['8.', 'CURRENT PAYMENT DUE', summary.currentPaymentDue],
-    ['9.', 'Balance to finish, including retainage', summary.balanceToFinishIncludingRetainage],
+  const amountX = C1 + LEFT_W;
+  const numbered = [
+    ['1.', 'Original Contract Sum', summary.originalContractSum, null],
+    ['2.', 'Net change by change orders', summary.netChangeByChangeOrders, null],
+    ['3.', 'Contract sum to date (Line 1 ± 2)', summary.contractSumToDate, null],
+    ['4.', 'Total completed and stored to date', summary.totalCompletedAndStored, '(Column G on G703)'],
+    ['5.', 'Retainage:', null, null],
+    ['5a', `${(Number(summary.effectiveRetainageRate || 0) * 100).toFixed(2)}% of Completed Work:`,
+      summary.retainageOnCompletedWork, null],
+    ['5b', `${(Number(commitment.materials_retainage_pct || 0) * 100).toFixed(2)}% of Stored Material:`,
+      summary.retainageOnStoredMaterial, null],
+    ['', 'Total Retainage (Lines 5a + 5b or Total in Column I of G703)', summary.totalRetainage, null],
+    ['6.', 'Total earned less retainage', summary.totalEarnedLessRetainage, '(Line 4 Less Line 5 Total)'],
+    ['7.', 'Less previous certificates for payment', summary.previousCertificates, '(Line 6 from prior certificate)'],
+    ['8.', 'Current payment due:', summary.currentPaymentDue, null],
+    ['9.', 'Balance to finish, including retainage', summary.balanceToFinishIncludingRetainage, '(Line 3 less Line 6)'],
   ];
 
-  for (const [number, label, value] of rows) {
-    const isDue = number === '8.';
-    if (isDue) a.box(MARGIN, y - 6, RIGHT - MARGIN, 20, { fill: BAND, border: RULE });
-    a.text(number, MARGIN + 6, y, { size: isDue ? 10 : 9, font: isDue ? bold : regular });
-    a.text(label, MARGIN + 26, y, { size: isDue ? 10 : 9, font: isDue ? bold : regular });
-    a.text(money(value), RIGHT - 6, y, { size: isDue ? 10 : 9, font: isDue ? bold : regular, align: 'right' });
-    y -= isDue ? 24 : 17;
-    if (!isDue) a.line(MARGIN, y + 5, RIGHT);
-
-    // A payment made outside the application chain is the one figure on this
-    // page nobody can derive from the others. Say what it was, under line 7,
-    // rather than leaving a reader to wonder why line 7 beats the last line 6.
-    if (number === '7.' && Number(summary.priorPaymentAdjustment) > 0) {
-      const note = payApp.prior_payment_note
-        || 'paid outside the application chain';
-      a.text(
-        `includes ${money(summary.priorPaymentAdjustment)} ${note}`,
-        MARGIN + 26, y + 9, { size: 7.5, color: GREY }
-      );
-      y -= 10;
+  for (const [num, labelText, amount, note] of numbered) {
+    const isDue = num === '8.';
+    const isSub = num === '5a' || num === '5b';
+    // The highlighted line 8 band is taller than a normal row; without this it
+    // sat on top of the "(Line 6 from prior certificate)" note above it.
+    if (isDue) y -= 5;
+    if (isDue) box(C1 - 4, y - 4, LEFT_W + 12, 15, { fill: BAND, border: RULE });
+    text(num === '5a' || num === '5b' ? '' : num, C1, y, { size: isDue ? 9 : 8, font: isDue ? ctx.bold : ctx.regular });
+    text(isSub ? `${num === '5a' ? 'a.' : 'b.'}  ${labelText}` : labelText,
+      C1 + (isSub ? 26 : 16), y, { size: isDue ? 9 : 8, font: isDue ? ctx.bold : ctx.regular });
+    if (amount !== null && amount !== undefined) {
+      text(money(amount), isSub ? amountX - 80 : amountX, y,
+        { size: isDue ? 9 : 8, font: isDue ? ctx.bold : ctx.regular, align: 'right' });
+    }
+    y -= isDue ? 17 : 11;
+    if (note) {
+      text(note, C1 + 16, y + 1, { size: 6.6, color: GREY });
+      y -= 9;
+    }
+    // A payment made outside the applications is the one figure on this page
+    // that cannot be derived from the others. Say what it was.
+    if (num === '7.' && Number(summary.priorPaymentAdjustment) > 0) {
+      text(`includes ${money(summary.priorPaymentAdjustment)} ${payApp.prior_payment_note || 'paid outside the applications'}`,
+        C1 + 16, y + 1, { size: 6.6, color: GREY });
+      y -= 9;
     }
   }
 
-  y -= 14;
-  a.line(MARGIN, y, RIGHT, 1.2, INK);
-  y -= 16;
+  // Right half: signature and notary, as on the workbook.
+  let sy = ry - 14;
+  text('SUBCONTRACTOR:', C3 - 26, sy, { size: 7, color: GREY });
+  text(commitment.sub_company || '', C3 + 60, sy, { size: 8.5, font: ctx.bold });
+  sy -= 26;
+  ctx.line(C3 - 26, sy, C3 + 150, 0.8, INK);
+  if (payApp.signer_name) text(payApp.signer_name, C3 - 24, sy + 4, { size: 8.5, font: ctx.bold });
+  text('By:', C3 - 26, sy - 9, { size: 7, color: GREY });
+  ctx.line(C3 + 170, sy, RIGHT, 0.8, INK);
+  text(asDate(payApp.submitted_at) || asDate(payApp.application_date), C3 + 172, sy + 4, { size: 8.5 });
+  text('Date:', C3 + 170, sy - 9, { size: 7, color: GREY });
+  sy -= 26;
+  text('State of:', C3 - 26, sy, { size: 7.6 });
+  ctx.line(C3 + 10, sy - 2, C3 + 150, 0.6, RULE);
+  sy -= 13;
+  text('County of:', C3 - 26, sy, { size: 7.6 });
+  ctx.line(C3 + 10, sy - 2, C3 + 150, 0.6, RULE);
+  sy -= 15;
+  text('Subscribed and sworn to before', C3 - 26, sy, { size: 7.6 });
+  sy -= 11;
+  text('me this', C3 - 26, sy, { size: 7.6 });
+  ctx.line(C3 + 8, sy - 2, C3 + 90, 0.6, RULE);
+  text('day of', C3 + 96, sy, { size: 7.6 });
+  ctx.line(C3 + 124, sy - 2, RIGHT, 0.6, RULE);
+  sy -= 22;
+  text('Notary Public:', C3 - 26, sy, { size: 7.6 });
+  ctx.line(C3 + 30, sy - 2, RIGHT, 0.6, RULE);
+  sy -= 15;
+  text('My Commission expires:', C3 - 26, sy, { size: 7.6 });
+  ctx.line(C3 + 70, sy - 2, RIGHT, 0.6, RULE);
 
-  const certification = "The undersigned Subcontractor certifies that to the best of the Subcontractor's knowledge, information and belief the Work covered by this Application for Payment has been completed in accordance with the Subcontract Documents, that all amounts have been paid by the Subcontractor for Work for which previous Certificates for Payment were issued and payments received, and that current payment shown herein is now due.";
-  for (const row of wrap(certification, regular, 8.5, RIGHT - MARGIN)) {
-    a.text(row, MARGIN, y, { size: 8.5 });
-    y -= 11;
-  }
-
-  y -= 26;
-  a.text('SUBCONTRACTOR:', MARGIN, y, { size: 8, color: GREY });
-  a.text(commitment.sub_company, MARGIN + 100, y, { size: 9.5, font: bold });
-  y -= 30;
-  a.line(MARGIN, y, MARGIN + 240, 0.9, INK);
-  a.line(MARGIN + 280, y, MARGIN + 420, 0.9, INK);
-  a.text('SIGNATURE', MARGIN, y - 11, { size: 7.5, color: GREY });
-  a.text('DATE', MARGIN + 280, y - 11, { size: 7.5, color: GREY });
-  if (payApp.signer_name) {
-    a.text(payApp.signer_name, MARGIN + 2, y + 5, { size: 10, font: bold });
-    a.text(payApp.signer_title || '', MARGIN + 2, y - 22, { size: 8, color: GREY });
-    a.text(asDate(payApp.submitted_at), MARGIN + 282, y + 5, { size: 10 });
-    a.text('Submitted electronically', MARGIN + 282, y - 22, { size: 7.5, color: GREY });
-  }
-
-  // ---------- Continuation sheet ----------
-  // Landscape, with every money column right-aligned to its own edge.
-  const WIDE_RIGHT = PAGE.height - MARGIN; // 752pt on a sideways letter page
-  const cols = {
-    item: MARGIN, description: MARGIN + 64,
-    scheduled: 405, previous: 478, thisPeriod: 550, stored: 608,
-    total: 660, percent: 698, retainage: WIDE_RIGHT,
-  };
-
-  let sheet = null;
-  let sy = 0;
-
-  const header = () => {
-    sheet = page(true);
-    sy = PAGE.width - MARGIN;
-    sheet.text('CONTINUATION SHEET', MARGIN, sy - 8, { size: 11, font: bold });
-    sheet.text(`${commitment.sub_company} · Application No. ${payApp.number}${period ? ` · ${period}` : ''}`,
-      WIDE_RIGHT, sy - 8, { size: 8.5, align: 'right' });
-    sy -= 26;
-
-    sheet.box(MARGIN, sy - 22, WIDE_RIGHT - MARGIN, 22, { fill: BAND, border: INK, width: 0.8 });
-    const head = (label, x, align = 'left') => sheet.text(label, x, sy - 15, { size: 7, font: bold, align });
-    head('ITEM NO.', cols.item + 3);
-    head('DESCRIPTION OF WORK', cols.description + 3);
-    head('SCHEDULED', cols.scheduled, 'right');
-    head('PREVIOUS', cols.previous, 'right');
-    head('THIS PERIOD', cols.thisPeriod, 'right');
-    head('STORED', cols.stored, 'right');
-    head('TOTAL', cols.total, 'right');
-    head('%', cols.percent, 'right');
-    head('RETAINAGE', cols.retainage, 'right');
-    sy -= 36;
-  };
-
-  const row = (line, { isTotal = false, label = null } = {}) => {
-    if (sy < 70) header();
-    if (isTotal) sheet.box(MARGIN, sy - 5, WIDE_RIGHT - MARGIN, 18, { fill: BAND, border: RULE });
-    const font = isTotal ? bold : regular;
-    const size = 8;
-    if (!isTotal) sheet.text(line.itemNo || '', cols.item + 3, sy, { size, font });
-    sheet.text(label || (line.description || '').slice(0, 52), cols.description + 3, sy, { size, font });
-    sheet.text(money(line.scheduledValue), cols.scheduled, sy, { size, font, align: 'right' });
-    sheet.text(money(line.previousCompleted), cols.previous, sy, { size, font, align: 'right' });
-    sheet.text(money(line.thisPeriod), cols.thisPeriod, sy, { size, font, align: 'right' });
-    sheet.text(money(line.materialsStored), cols.stored, sy, { size, font, align: 'right' });
-    sheet.text(money(line.totalCompleted), cols.total, sy, { size, font, align: 'right' });
-    sheet.text(percent(line.percent), cols.percent, sy, { size, font, align: 'right' });
-    sheet.text(money(line.retainage), cols.retainage, sy, { size, font, align: 'right' });
-    sy -= isTotal ? 22 : 14;
-    if (!isTotal) sheet.line(MARGIN, sy + 4, WIDE_RIGHT, 0.4);
-  };
-
-  const section = (title) => {
-    if (sy < 96) header();
-    sy -= 6;
-    sheet.text(title, MARGIN + 3, sy, { size: 7.5, font: bold, color: GREY });
-    sy -= 14;
-  };
-
-  header();
-  section('CONTRACT LINES');
-  for (const l of lines.filter((l) => l.source !== 'co')) row(l);
-  row(base, { isTotal: true, label: 'TOTAL — CONTRACT LINES' });
-
-  const coLines = lines.filter((l) => l.source === 'co');
-  if (coLines.length) {
-    section('CHANGE ORDERS');
-    for (const l of coLines) row(l);
-    row(changeOrders, { isTotal: true, label: 'TOTAL — CHANGE ORDERS' });
-  }
-
-  sy -= 4;
-  row(grand, { isTotal: true, label: 'GRAND TOTAL' });
-
-  // Footer on every page
-  const pages = pdf.getPages();
-  pages.forEach((p, i) => {
-    const edge = p.getWidth() - MARGIN;
-    p.drawText(`${commitment.sub_company} · Application ${payApp.number}`,
-      { x: MARGIN, y: 26, size: 7.5, font: regular, color: GREY });
-    const label = `Page ${i + 1} of ${pages.length}`;
-    p.drawText(label, { x: edge - regular.widthOfTextAtSize(label, 7.5), y: 26, size: 7.5, font: regular, color: GREY });
-  });
-
-  return Buffer.from(await pdf.save());
+  // Change order summary, bottom left.
+  const co = view.changeOrderSummary || {};
+  let cy = Math.min(y, sy) - 18;
+  if (cy < 96) cy = 96;
+  const COLA = C1 + 210;
+  const COLB = C1 + 320;
+  text('CHANGE ORDER SUMMARY', C1 + 16, cy, { size: 8, font: ctx.bold });
+  text('ADDITIONS', COLA, cy, { size: 7.4, font: ctx.bold, align: 'right' });
+  text('DEDUCTIONS', COLB, cy, { size: 7.4, font: ctx.bold, align: 'right' });
+  cy -= 4;
+  line(C1, cy, COLB + 10, 0.7, RULE);
+  cy -= 11;
+  text('Total changes approved', C1 + 16, cy, { size: 7.4 });
+  text(money(co.approvedPreviousAdditions || 0), COLA, cy, { size: 7.4, align: 'right' });
+  text(money(co.approvedPreviousDeductions || 0), COLB, cy, { size: 7.4, align: 'right' });
+  cy -= 9;
+  text('in previous months by Owner:', C1 + 16, cy, { size: 7.4 });
+  cy -= 12;
+  text('Total approved this Month:', C1 + 16, cy, { size: 7.4 });
+  text(money(co.approvedThisMonthAdditions || 0), COLA, cy, { size: 7.4, align: 'right' });
+  text(money(co.approvedThisMonthDeductions || 0), COLB, cy, { size: 7.4, align: 'right' });
+  cy -= 4;
+  line(C1 + 140, cy, COLB + 10, 0.7, RULE);
+  cy -= 11;
+  text('Totals:', COLA - 80, cy, { size: 7.4, font: ctx.bold });
+  text(money((co.approvedPreviousAdditions || 0) + (co.approvedThisMonthAdditions || 0)), COLA, cy,
+    { size: 7.4, font: ctx.bold, align: 'right' });
+  text(money((co.approvedPreviousDeductions || 0) + (co.approvedThisMonthDeductions || 0)), COLB, cy,
+    { size: 7.4, font: ctx.bold, align: 'right' });
+  cy -= 12;
+  text('Net change by change orders:', C1 + 16, cy, { size: 7.4, font: ctx.bold });
+  text(money(view.summary.netChangeByChangeOrders), COLA, cy, { size: 7.4, font: ctx.bold, align: 'right' });
 }
 
-/**
- * Florida's conditional waiver on progress payment. The wording follows the
- * form Precision already issues; the figures and dates come from the
- * application, so the period on the waiver is the period on the pay app.
- */
-async function buildWaiverPdf(view, project) {
+// ---------------------------------------------------------------------------
+// Composition
+// ---------------------------------------------------------------------------
+
+function paginate(rows, capacity) {
+  const pages = [];
+  let current = [];
+  for (const row of rows) {
+    if (current.length >= capacity) {
+      pages.push(current);
+      current = [];
+    }
+    current.push(row);
+  }
+  if (current.length) pages.push(current);
+  return pages;
+}
+
+function drawApplication(doc, view, project) {
+  const { pdf, regular, bold, logo, page } = doc;
+  const rows = continuationRows(view);
+
+  // Body height available under the sheet header and the column band.
+  const bodyTop = SHEET.height - MARGIN - 8 - 38 - 8 - HEADER_H - 13;
+  const capacity = Math.floor((bodyTop - MARGIN - 18) / ROW_H);
+  const sheets = paginate(rows, capacity);
+  const pageCount = 1 + sheets.length;
+
+  const ctxOf = (p) => Object.assign(p, { regular, bold });
+
+  drawG702(ctxOf(page()), { view, project, pageCount });
+
+  sheets.forEach((sheetRows, i) => {
+    const ctx = ctxOf(page());
+    const afterHeader = sheetHeader(ctx, {
+      pageNumber: i + 2,
+      pageCount,
+      payApp: view.payApp,
+      project,
+      retainageRate: view.summary.effectiveRetainageRate,
+    });
+    let y = columnHeader(ctx, afterHeader) - ROW_H;
+    for (const row of sheetRows) y = drawRow(ctx, y, row);
+  });
+
+  return pageCount;
+}
+
+function drawWaiver(doc, view, project) {
+  const { regular, bold, logo, page } = doc;
   const { payApp, commitment, summary } = view;
-  const { pdf, regular, bold, logo, page } = await newDocument();
-  const w = page();
-  let y = PAGE.height - MARGIN - 10;
+  const w = Object.assign(page(), { regular, bold });
+  const TEXT_W = 700;
+  const LEFT = (SHEET.width - TEXT_W) / 2;
+  let y = SHEET.height - MARGIN - 8;
 
   if (logo) {
-    const width = 110;
+    const width = 100;
     const height = (logo.height / logo.width) * width;
-    w.p.drawImage(logo, { x: MARGIN, y: y - height + 4, width, height });
-    y -= height + 22;
+    w.p.drawImage(logo, { x: LEFT, y: y - height + 4, width, height });
+    y -= height + 10;
   }
 
-  w.text('CONDITIONAL WAIVER AND RELEASE ON PROGRESS PAYMENT', PAGE.width / 2, y, {
-    size: 12.5, font: bold, align: 'center',
+  w.text('CONDITIONAL WAIVER AND RELEASE ON PROGRESS PAYMENT', SHEET.width / 2, y, {
+    size: 12, font: bold, align: 'center',
   });
-  y -= 20;
-  w.text(`Project: ${project.name}`, PAGE.width / 2, y, { size: 10, align: 'center' });
-  y -= 14;
-  w.text(`Pay Application #${payApp.number}`, PAGE.width / 2, y, { size: 10, align: 'center' });
-  y -= 24;
+  y -= 15;
+  w.text(`${project.name || ''} · Pay Application #${payApp.number}`, SHEET.width / 2, y,
+    { size: 9, align: 'center', color: GREY });
+  y -= 18;
 
   const owner = project.owner_name || '[owner]';
   const location = [project.address1, project.address2].filter(Boolean).join(', ');
@@ -328,46 +528,65 @@ async function buildWaiverPdf(view, project) {
   ];
 
   for (const paragraph of paragraphs) {
-    for (const row of wrap(paragraph, regular, 9, RIGHT - MARGIN)) {
-      w.text(row, MARGIN, y, { size: 9 });
-      y -= 12.5;
+    for (const row of wrap(paragraph, regular, 8.4, TEXT_W)) {
+      w.text(row, LEFT, y, { size: 8.4 });
+      y -= 10.6;
     }
-    y -= 10;
+    y -= 7;
   }
 
   const executed = payApp.submitted_at ? new Date(payApp.submitted_at) : new Date();
-  y -= 6;
+  y -= 2;
   w.text(`Executed this the ${executed.getUTCDate()} day of ${MONTHS[executed.getUTCMonth()]}, ${executed.getUTCFullYear()}.`,
-    MARGIN, y, { size: 9 });
+    LEFT, y, { size: 8.4 });
 
-  y -= 34;
-  w.text(commitment.sub_company, MARGIN, y, { size: 10, font: bold });
-  w.text('(Company name)', MARGIN + 260, y, { size: 8, color: GREY });
+  // Signature on the left, notary on the right — it fits side by side in
+  // landscape, which keeps the waiver to a single page.
+  const RCOL = LEFT + 380;
+  let sy = y - 24;
+  w.text(commitment.sub_company, LEFT, sy, { size: 9.5, font: bold });
+  w.text('(Company name)', LEFT + 200, sy, { size: 7, color: GREY });
+  sy -= 28;
+  w.line(LEFT, sy, LEFT + 300, 0.9, INK);
+  if (payApp.signer_name) w.text(payApp.signer_name, LEFT + 2, sy + 5, { size: 9.5, font: bold });
+  w.text('By (Signature)', LEFT, sy - 10, { size: 7, color: GREY });
+  sy -= 30;
+  w.line(LEFT, sy, LEFT + 300, 0.9, INK);
+  if (payApp.signer_title) w.text(payApp.signer_title, LEFT + 2, sy + 5, { size: 9 });
+  w.text('Title', LEFT, sy - 10, { size: 7, color: GREY });
 
-  y -= 34;
-  w.line(MARGIN, y, MARGIN + 240, 0.9, INK);
-  w.text('By (Signature)', MARGIN, y - 11, { size: 8, color: GREY });
-  if (payApp.signer_name) w.text(payApp.signer_name, MARGIN + 2, y + 5, { size: 10, font: bold });
+  let ny = y - 24;
+  w.text('STATE OF ______________________', RCOL, ny, { size: 8.4 });
+  ny -= 15;
+  w.text('COUNTY OF ____________________', RCOL, ny, { size: 8.4 });
+  ny -= 20;
+  w.text('This instrument was acknowledged before me', RCOL, ny, { size: 8.4 });
+  ny -= 12;
+  w.text('the ______ day of ____________, 20____.', RCOL, ny, { size: 8.4 });
+  ny -= 32;
+  w.line(RCOL, ny, RCOL + 260, 0.9, INK);
+  w.text('Notary Public', RCOL, ny - 10, { size: 7, color: GREY });
+  ny -= 28;
+  w.text('My commission expires: ____________________', RCOL, ny, { size: 8.4 });
+}
 
-  y -= 34;
-  w.line(MARGIN, y, MARGIN + 240, 0.9, INK);
-  w.text('Title', MARGIN, y - 11, { size: 8, color: GREY });
-  if (payApp.signer_title) w.text(payApp.signer_title, MARGIN + 2, y + 5, { size: 10 });
+/**
+ * The application, its continuation sheets AND the conditional waiver, in one
+ * file — so the subcontractor prints, signs and returns one thing rather than
+ * chasing two downloads and stapling them in the right order.
+ */
+async function buildApplicationPdf(view, project) {
+  const doc = await newDocument();
+  drawApplication(doc, view, project);
+  drawWaiver(doc, view, project);
+  return Buffer.from(await doc.pdf.save());
+}
 
-  // Notary block
-  y -= 46;
-  w.text('STATE OF ______________________', MARGIN, y, { size: 9 });
-  y -= 16;
-  w.text('COUNTY OF ____________________', MARGIN, y, { size: 9 });
-  y -= 24;
-  w.text('This instrument was acknowledged before me the ______ day of ____________, 20____.', MARGIN, y, { size: 9 });
-  y -= 40;
-  w.line(MARGIN, y, MARGIN + 240, 0.9, INK);
-  w.text('Notary Public', MARGIN, y - 11, { size: 8, color: GREY });
-  y -= 30;
-  w.text('My commission expires: ____________________', MARGIN, y, { size: 9 });
-
-  return Buffer.from(await pdf.save());
+/** The waiver on its own, for when only that is being reissued. */
+async function buildWaiverPdf(view, project) {
+  const doc = await newDocument();
+  drawWaiver(doc, view, project);
+  return Buffer.from(await doc.pdf.save());
 }
 
 module.exports = { buildApplicationPdf, buildWaiverPdf };

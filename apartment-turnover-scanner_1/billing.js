@@ -423,6 +423,50 @@ async function loadApplication(payAppId) {
 }
 
 /** Everything a screen or a PDF needs about one application. */
+/**
+ * The CHANGE ORDER SUMMARY box on the G702: what was approved before this
+ * period, what was approved during it, split into additions and deductions.
+ *
+ * The two rows always add up to line 2. The workbook this replaces printed
+ * $4,500 in "Totals" above a net change of $8,289.18 — a change order approved
+ * mid-stream fell out of the box entirely. Deriving both rows from the same
+ * list, and letting "this month" take everything not clearly earlier, means
+ * the box cannot disagree with line 2.
+ */
+async function changeOrderSummaryFor(commitmentId, periodStart) {
+  const rows = await pool.query(
+    `SELECT co.amount, co.approved_at
+     FROM change_orders co
+     JOIN sov_lines s ON s.change_order_id = co.id
+     WHERE co.commitment_id = $1 AND co.status = 'approved'
+     GROUP BY co.id, co.amount, co.approved_at`,
+    [commitmentId]
+  );
+
+  const out = {
+    approvedPreviousAdditions: 0,
+    approvedPreviousDeductions: 0,
+    approvedThisMonthAdditions: 0,
+    approvedThisMonthDeductions: 0,
+  };
+  const start = periodStart ? new Date(periodStart) : null;
+
+  for (const row of rows.rows) {
+    const cents = toCents(row.amount);
+    const earlier = start && row.approved_at && new Date(row.approved_at) < start;
+    const bucket = earlier ? 'Previous' : 'ThisMonth';
+    const key = cents < 0 ? `approved${bucket}Deductions` : `approved${bucket}Additions`;
+    out[key] += Math.abs(cents);
+  }
+
+  return {
+    approvedPreviousAdditions: toDollars(out.approvedPreviousAdditions),
+    approvedPreviousDeductions: toDollars(out.approvedPreviousDeductions),
+    approvedThisMonthAdditions: toDollars(out.approvedThisMonthAdditions),
+    approvedThisMonthDeductions: toDollars(out.approvedThisMonthDeductions),
+  };
+}
+
 async function applicationView(payAppId) {
   const loaded = await loadApplication(payAppId);
   if (!loaded) return null;
@@ -434,7 +478,8 @@ async function applicationView(payAppId) {
     previousCertificatesCents: previous,
     priorPaymentAdjustmentCents: toCents(payApp.prior_payment_adjustment),
   });
-  return { payApp, commitment, ...computed };
+  const changeOrderSummary = await changeOrderSummaryFor(commitment.id, payApp.period_start);
+  return { payApp, commitment, changeOrderSummary, ...computed };
 }
 
 const newToken = () => crypto.randomBytes(24).toString('hex');
