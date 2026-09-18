@@ -3078,8 +3078,8 @@
               : ''}
           </span>
           <span class="row" style="gap:8px;">
-            <button class="secondary" id="pdfApp">Pay application PDF</button>
-            <button class="secondary" id="pdfWaiver">Conditional waiver PDF</button>
+            <button class="secondary" id="pdfApp">Pay application &amp; waiver (PDF)</button>
+            <button class="secondary" id="pdfWaiver">Waiver only</button>
           </span>
         </div>
         ${p.status === 'revise' && p.revise_note
