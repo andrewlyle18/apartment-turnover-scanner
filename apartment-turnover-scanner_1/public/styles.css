@@ -84,6 +84,11 @@ html, body {
 }
 
 main { flex: 1; padding: 14px; padding-bottom: 40px; max-width: 900px; margin: 0 auto; width: 100%; }
+/* Screens whose subject is a wide table — a schedule of values, a G703 — get
+   the window instead of the reading column. Without this the billing table
+   scrolled sideways inside a 900px box on a 1500px screen, which looks like a
+   bug because it is one: the space was there and we weren't using it. */
+main.wide { max-width: 1500px; }
 
 h1 { font-size: 20px; margin: 4px 0 12px; color: var(--brand); }
 h2 { font-size: 17px; margin: 0 0 10px; }
@@ -514,13 +519,15 @@ table.grid tr.block-head td {
 }
 table.grid tr.block-total td { border-top: 1px solid #d9e0e7; background: #fcfdfe; }
 .scroll-x { overflow-x: auto; }
-table.payapp { min-width: 1120px; }
+/* Wide enough that nothing collides, narrow enough to fit a laptop without
+   scrolling. Below this it does scroll, which is right on a phone. */
+table.payapp { min-width: 1060px; }
 /* A cost code and a line description should each sit on one line — a wrapped
    "09-990 (S)" reads as three different codes at a glance. */
 table.payapp td:first-child, table.payapp th:first-child { white-space: nowrap; }
 table.payapp td:nth-child(2) { min-width: 210px; }
 input.cell {
-  width: 104px; padding: 5px 7px; font-size: 14px; text-align: right;
+  width: 92px; padding: 5px 7px; font-size: 14px; text-align: right;
   border: 1px solid #d3dae1; border-radius: 6px; font-variant-numeric: tabular-nums;
 }
 input.cell:focus { outline: 2px solid var(--brand); outline-offset: -1px; }

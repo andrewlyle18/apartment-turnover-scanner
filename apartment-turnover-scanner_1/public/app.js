@@ -147,6 +147,12 @@
   };
   const statusLabel = (s) => STATUS_LABEL[s] || String(s || '').toUpperCase();
 
+  // Widen the reading column for screens built around a table rather than prose.
+  function setWide(on) {
+    const main = root.closest('main') || document.querySelector('main');
+    if (main) main.classList.toggle('wide', !!on);
+  }
+
   function on(id, event, handler) {
     const el = document.getElementById(id);
     if (el) el.addEventListener(event, handler);
@@ -194,6 +200,11 @@
   async function route() {
     stopPolling();
     dashboardRefresh = null;
+    // Most screens read better in a narrow column. The billing tables don't —
+    // a G703 is ten columns wide and no amount of good intentions makes it fit
+    // in 900px. Each screen opts in; the default goes back to narrow here, so a
+    // wide screen can never leak into the next one.
+    setWide(false);
     const hash = window.location.hash.slice(1);
 
     if (!hash || hash === '/') {
@@ -2238,6 +2249,7 @@
   }
 
   async function renderCommitment(projectId, commitmentId, tab = 'sov') {
+    setWide(true);
     root.innerHTML = `<div class="card"><p class="help">Loading...</p></div>`;
     let data;
     try {
@@ -2942,6 +2954,7 @@
   // The administrator's view of one application: what the sub entered, what
   // you changed, and the summary the cheque is written from.
   async function renderPayApp(projectId, commitmentId, payAppId) {
+    setWide(true);
     root.innerHTML = `<div class="card"><p class="help">Loading application...</p></div>`;
     let view;
     try {
