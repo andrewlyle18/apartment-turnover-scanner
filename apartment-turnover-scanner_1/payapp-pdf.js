@@ -69,6 +69,7 @@ async function newDocument() {
   const pdf = await PDFDocument.create();
   const regular = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
+  const italic = await pdf.embedFont(StandardFonts.HelveticaOblique);
   let logo = null;
   try {
     if (fs.existsSync(logoPath)) logo = await pdf.embedPng(fs.readFileSync(logoPath));
@@ -94,7 +95,7 @@ async function newDocument() {
     return { p, text, line, vline, box };
   };
 
-  return { pdf, regular, bold, logo, page };
+  return { pdf, regular, bold, italic, logo, page };
 }
 
 // ---------------------------------------------------------------------------
@@ -104,144 +105,181 @@ async function newDocument() {
 // Right edge of each money column, and the left edge of the two text columns.
 // The lettering is the standard one: A item, B description, C scheduled value,
 // D previously completed, E this period, F stored, G total, then the unlettered
-// per-cent column, H balance to finish, I retainage.
-const COL = {
-  item: { x: MARGIN + 4, align: 'left', width: 62 },
-  description: { x: MARGIN + 74, align: 'left', width: 198 },
-  scheduled: { x: 352, align: 'right' },
-  previous: { x: 422, align: 'right' },
-  thisPeriod: { x: 488, align: 'right' },
-  stored: { x: 548, align: 'right' },
-  total: { x: 620, align: 'right' },
-  percent: { x: 656, align: 'right' },
-  // These last two need real daylight between them: right-aligned headers
-  // ("BALANCE TO FINISH", "RETAINAGE") ran together when they shared an edge.
-  balance: { x: 706, align: 'right' },
-  retainage: { x: RIGHT - 2, align: 'right' },
+// per-cent column, H balance to finish, I retainage.// The form is a ruled grid, not a list of figures with tidy spacing. Every
+// cell on a G703 is boxed, the column letters sit in their own band, and
+// "WORK COMPLETED" spans D and E above them. Getting that wrong is what made
+// our first attempt read as "a table of the right numbers" rather than as the
+// document a project manager expects to receive.
+
+const TABLE_L = 18;
+const TABLE_R = SHEET.width - 18;
+
+// Column boundaries, left to right. Ten columns; the gaps are sized for the
+// widest figure each one has to hold, not evenly.
+const EDGES = [18, 74, 250, 334, 406, 474, 546, 620, 658, 716, 774];
+const CELL = {
+  item: 0, description: 1, scheduled: 2, previous: 3, thisPeriod: 4,
+  stored: 5, total: 6, percent: 7, balance: 8, retainage: 9,
 };
-// Vertical rules sit between columns, not through them.
-const DIVIDERS = [MARGIN + 70, 278, 358, 428, 494, 554, 626, 662, 712];
+const cellLeft = (i) => EDGES[i];
+const cellRight = (i) => EDGES[i + 1];
+const cellMid = (i) => (EDGES[i] + EDGES[i + 1]) / 2;
 
-const ROW_H = 12.4;
-const HEADER_H = 54;
+const ROW_H = 11.6;
+const LETTER_H = 11;
+const HEAD_H = 52;
 
-function sheetHeader(ctx, { pageNumber, pageCount, payApp, project, retainageRate }) {
-  const { text, line } = ctx;
-  let y = SHEET.height - MARGIN - 8;
-
-  text('CONTINUATION SHEET', MARGIN, y, { size: 10, font: ctx.bold });
-  text('DOCUMENT G703', SHEET.width / 2, y, { size: 9, font: ctx.bold, align: 'center' });
-  text(`Page ${pageNumber} of ${pageCount}`, RIGHT, y, { size: 9, align: 'right' });
-  y -= 11;
-  text('Document G702, APPLICATION AND CERTIFICATE FOR PAYMENT, containing', MARGIN, y, { size: 7, color: GREY });
-  text(`APPLICATION NUMBER: ${payApp.number}`, 470, y, { size: 8 });
-  y -= 9.5;
-  text("Contractor's signed Certification is attached.", MARGIN, y, { size: 7, color: GREY });
-  text(`APPLICATION DATE: ${asDate(payApp.application_date) || asDate(payApp.submitted_at)}`, 470, y, { size: 8 });
-  y -= 9.5;
-  text('Use Column I on Contracts where variable retainage for line items may apply.', MARGIN, y, { size: 7, color: GREY });
-  text(`PERIOD: ${[asDate(payApp.period_start), asDate(payApp.period_end)].filter(Boolean).join(' – ')}`,
-    470, y, { size: 8 });
-  y -= 9.5;
-  text(`ARCHITECT'S PROJECT NO: ${project.name || ''}`, 470, y, { size: 8 });
-  text(`Retainage: ${(Number(retainageRate || 0) * 100).toFixed(2)}%`, MARGIN, y, { size: 7, color: GREY });
-
-  return y - 8;
+/** Text centred in a column, wrapped onto as many lines as it needs. */
+function centreStack(ctx, col, linesOfText, bottom, height, size = 5.8, font = null) {
+  const f = font || ctx.bold;
+  const total = linesOfText.length * (size + 1.4);
+  let y = bottom + (height + total) / 2 - size - 1;
+  for (const l of linesOfText) {
+    ctx.text(l, cellMid(col), y, { size, font: f, align: 'center' });
+    y -= size + 1.4;
+  }
 }
 
-/** The lettered column band plus the stacked column titles. */
+function sheetHeader(ctx, { pageNumber, pageCount, payApp, project, sectionLabel }) {
+  const { text } = ctx;
+  let y = SHEET.height - 26;
+
+  text('CONTINUATION SHEET', TABLE_L, y, { size: 9.5, font: ctx.bold });
+  text('DOCUMENT G703', SHEET.width / 2, y, { size: 9, font: ctx.italic, align: 'center' });
+  text(`Page ${pageNumber} of ${pageCount}`, TABLE_R, y, { size: 8, align: 'right' });
+  y -= 12;
+
+  const LAB = 640;
+  text('Document G702, APPLICATION AND CERTIFICATE FOR PAYMENT, containing', TABLE_L, y, { size: 7 });
+  text('APPLICATION NUMBER:', LAB, y, { size: 7, align: 'right' });
+  text(String(payApp.number), LAB + 6, y, { size: 7 });
+  y -= 9;
+  text("Contractor's signed Certification is attached.", TABLE_L, y, { size: 7 });
+  text('APPLICATION DATE:', LAB, y, { size: 7, align: 'right' });
+  text(asDate(payApp.application_date) || asDate(payApp.submitted_at), LAB + 6, y, { size: 7 });
+  y -= 9;
+  text('Use Column I on Contracts where variable retainage for line items may apply.', TABLE_L, y, { size: 7 });
+  text('PERIOD:', LAB, y, { size: 7, align: 'right' });
+  text([asDate(payApp.period_start), asDate(payApp.period_end)].filter(Boolean).join('-'), LAB + 6, y, { size: 7 });
+  y -= 9;
+  text('ARCHITECTS PROJECT NO:', LAB, y, { size: 7, align: 'right' });
+  text(project.name || '', LAB + 6, y, { size: 7 });
+
+  y -= 14;
+  // The section name sits above the table, as a caption — not as a band inside
+  // it, which is not how the form is laid out.
+  if (sectionLabel) {
+    text(sectionLabel, TABLE_L, y, { size: 7.5, font: ctx.bold });
+    y -= 9;
+  }
+  return y;
+}
+
+/** The lettered band and the two-tier column titles. Returns the body top. */
 function columnHeader(ctx, top) {
-  const { text, line, box, vline } = ctx;
-  const letterRow = top - 9;
-  const headTop = letterRow - 3;
-  const headBottom = headTop - HEADER_H;
+  const { text, box, line, vline } = ctx;
+  const letterBottom = top - LETTER_H;
+  const headBottom = letterBottom - HEAD_H;
 
-  box(MARGIN, headBottom, RIGHT - MARGIN, HEADER_H + 13, { fill: BAND, border: RULE });
+  // Outer frame for both bands.
+  box(TABLE_L, headBottom, TABLE_R - TABLE_L, LETTER_H + HEAD_H, { border: INK, width: 0.9 });
+  line(TABLE_L, letterBottom, TABLE_R, 0.9, INK);
 
-  const letters = [
-    ['A', COL.item.x + 20], ['B', 170], ['C', COL.scheduled.x - 30], ['D', COL.previous.x - 28],
-    ['E', COL.thisPeriod.x - 26], ['F', COL.stored.x - 24], ['G', COL.total.x - 30],
-    ['H', COL.balance.x - 20], ['I', COL.retainage.x - 22],
-  ];
-  for (const [letter, x] of letters) text(letter, x, letterRow, { size: 6.5, color: GREY, align: 'center' });
+  const letters = ['A', 'B', 'C', 'D', 'E', 'F', 'G', '', 'H', 'I'];
+  letters.forEach((letter, i) => {
+    if (letter) text(letter, cellMid(i), letterBottom + 3, { size: 6.5, align: 'center' });
+  });
 
-  const stack = (lines, col, size = 5.8) => {
-    let yy = headTop - 9;
-    for (const l of lines) {
-      text(l, col.x, yy, { size, font: ctx.bold, align: col.align === 'right' ? 'right' : 'left' });
-      yy -= 6.6;
-    }
-  };
+  // "WORK COMPLETED" spans D and E, with its own rule under it.
+  const splitY = headBottom + HEAD_H - 11;
+  text('WORK COMPLETED', (cellLeft(CELL.previous) + cellRight(CELL.thisPeriod)) / 2,
+    splitY + 3, { size: 6, font: ctx.bold, align: 'center' });
+  line(cellLeft(CELL.previous), splitY, cellRight(CELL.thisPeriod), 0.9, INK);
 
-  stack(['ITEM NO.'], COL.item, 6.2);
-  stack(['DESCRIPTION OF WORK'], COL.description, 6.2);
-  stack(['SCHEDULED', 'VALUE'], COL.scheduled, 6.2);
-  stack(['WORK COMPLETED', 'FROM PREVIOUS', 'APPLICATION (D + E)'], COL.previous, 5.5);
-  // Short header lines only: a long right-aligned title runs into its
-  // neighbour's column long before the numbers underneath ever would.
-  stack(['WORK', 'COMPLETED', 'THIS PERIOD'], COL.thisPeriod);
-  stack(['MATERIALS', 'PRESENTLY', 'STORED', '(NOT IN D OR E)'], COL.stored, 5.4);
-  stack(['TOTAL COMPLETED', 'AND STORED', 'TO DATE (D+E+F)'], COL.total, 5.5);
-  stack(['%', '(G / C)'], COL.percent);
-  stack(['BALANCE TO', 'FINISH', '(C - G)'], COL.balance, 5.6);
-  stack(['RETAINAGE'], COL.retainage, 5.8);
+  centreStack(ctx, CELL.item, ['ITEM NO.'], headBottom, HEAD_H, 6);
+  centreStack(ctx, CELL.description, ['DESCRIPTION OF WORK'], headBottom, HEAD_H, 6);
+  centreStack(ctx, CELL.scheduled, ['SCHEDULED VALUE'], headBottom, HEAD_H, 6);
+  centreStack(ctx, CELL.previous, ['FROM', 'PREVIOUS', 'APPLICATION', '(D+E)'], headBottom, HEAD_H - 11, 5.8);
+  centreStack(ctx, CELL.thisPeriod, ['THIS PERIOD'], headBottom, HEAD_H - 11, 5.8);
+  centreStack(ctx, CELL.stored, ['MATERIALS', 'PRESENTLY', 'STORED (NOT IN', 'D OR E)'], headBottom, HEAD_H, 5.8);
+  centreStack(ctx, CELL.total, ['TOTAL', 'COMPLETED AND', 'STORED TO DATE', '(D+E+F)'], headBottom, HEAD_H, 5.8);
+  centreStack(ctx, CELL.percent, ['% (G/C)'], headBottom, HEAD_H, 5.8);
+  centreStack(ctx, CELL.balance, ['BALANCE TO', 'FINISH (C-G)'], headBottom, HEAD_H, 5.8);
+  centreStack(ctx, CELL.retainage, ['RETAINAGE'], headBottom, HEAD_H, 5.8);
 
-  for (const x of DIVIDERS) vline(x, headBottom, headTop + 13, 0.6, RULE);
-  line(MARGIN, headBottom, RIGHT, 0.9, RULE);
+  // Verticals run the whole header, except the one inside "WORK COMPLETED",
+  // which starts below that spanning title.
+  for (let i = 1; i < EDGES.length - 1; i++) {
+    const topY = i === CELL.thisPeriod ? splitY : letterBottom;
+    vline(EDGES[i], headBottom, topY, 0.9, INK);
+    vline(EDGES[i], letterBottom, top, 0.9, INK);
+  }
   return headBottom;
 }
 
-function drawRow(ctx, y, row) {
-  const { text, line, vline, box } = ctx;
-  const font = row.kind === 'total' || row.kind === 'grand' ? ctx.bold : ctx.regular;
-  const size = row.kind === 'grand' ? 8 : 7.6;
+function drawBodyRow(ctx, y, row) {
+  const { text, box, vline } = ctx;
+  const bold = row.kind === 'total' || row.kind === 'grand';
+  const font = bold ? ctx.bold : ctx.regular;
+  const size = 7;
 
-  if (row.kind === 'section') {
-    box(MARGIN, y - 3, RIGHT - MARGIN, ROW_H, { fill: BAND, border: HAIR });
-    text(row.label, COL.item.x, y + 1, { size: 7.4, font: ctx.bold });
-    return y - ROW_H;
-  }
-  if (row.kind === 'spacer') return y - ROW_H / 2;
+  box(TABLE_L, y, TABLE_R - TABLE_L, ROW_H, { border: INK, width: bold ? 0.9 : 0.5 });
+  for (let i = 1; i < EDGES.length - 1; i++) vline(EDGES[i], y, y + ROW_H, 0.5, INK);
 
-  if (row.kind === 'total' || row.kind === 'grand') line(MARGIN, y + ROW_H - 4, RIGHT, 0.8, RULE);
+  const baseline = y + 3.4;
+  const left = (col, value) => text(value, cellLeft(col) + 3, baseline, { size, font });
+  const right = (col, value) => text(value, cellRight(col) - 3, baseline, { size, font, align: 'right' });
 
-  text(row.itemNo || '', COL.item.x, y + 1, { size, font });
-  text(clip(row.description, font, size, COL.description.width), COL.description.x, y + 1, { size, font });
-  const cell = (key, value) => text(value, COL[key].x, y + 1, { size, font, align: 'right' });
-  cell('scheduled', money(row.scheduledValue));
-  cell('previous', money(row.previousCompleted));
-  cell('thisPeriod', money(row.thisPeriod));
-  cell('stored', money(row.materialsStored));
-  cell('total', money(row.totalCompleted));
-  cell('percent', pct1(row.percent));
-  cell('balance', money(row.balanceToFinish));
-  cell('retainage', money(row.retainage));
+  if (row.kind === 'blank') return y - ROW_H;
 
-  if (row.kind !== 'total' && row.kind !== 'grand') line(MARGIN, y - 3, RIGHT, 0.4, HAIR);
-  for (const x of DIVIDERS) vline(x, y - 3, y + ROW_H - 3, 0.4, HAIR);
+  left(CELL.item, row.itemNo || '');
+  left(CELL.description, clip(row.description, font, size, cellRight(CELL.description) - cellLeft(CELL.description) - 6));
+  right(CELL.scheduled, money(row.scheduledValue));
+  right(CELL.previous, money(row.previousCompleted));
+  right(CELL.thisPeriod, money(row.thisPeriod));
+  right(CELL.stored, money(row.materialsStored));
+  right(CELL.total, money(row.totalCompleted));
+  right(CELL.percent, pct1(row.percent));
+  right(CELL.balance, money(row.balanceToFinish));
+  right(CELL.retainage, money(row.retainage));
   return y - ROW_H;
 }
 
-/** Everything the continuation sheets have to print, in order. */
-function continuationRows(view) {
-  const rows = [];
+/**
+ * The continuation sheets, in order: the contract lines with their total, then
+ * the change order packages with theirs, then the grand total. Each section
+ * starts its own sheet, which is how the workbook prints it.
+ */
+function continuationSections(view) {
+  const sections = [];
   const baseLines = view.lines.filter((l) => l.source !== 'co');
   const coLines = view.lines.filter((l) => l.source === 'co');
 
-  rows.push({ kind: 'section', label: 'CONTRACT LINES' });
-  for (const l of baseLines) rows.push({ ...l, kind: 'line' });
-  rows.push({ ...view.base, kind: 'total', description: 'TOTALS:', itemNo: '' });
+  sections.push({
+    label: 'Contract Lines',
+    rows: [
+      ...baseLines.map((l) => ({ ...l, kind: 'line' })),
+      { ...view.base, kind: 'total', description: 'TOTALS:', itemNo: '' },
+    ],
+  });
 
   if (coLines.length) {
-    rows.push({ kind: 'spacer' });
-    rows.push({ kind: 'section', label: 'WHOLE CHANGE ORDER PACKAGES' });
-    for (const l of coLines) rows.push({ ...l, kind: 'line' });
-    rows.push({ ...view.changeOrders, kind: 'total', description: 'TOTALS:', itemNo: '' });
+    sections.push({
+      label: 'Whole Change Order Packages',
+      rows: [
+        ...coLines.map((l) => ({ ...l, kind: 'line' })),
+        { ...view.changeOrders, kind: 'total', description: 'TOTALS:', itemNo: '' },
+      ],
+    });
   }
 
-  rows.push({ kind: 'spacer' });
-  rows.push({ ...view.grand, kind: 'grand', description: 'GRAND TOTALS', itemNo: '' });
-  return rows;
+  // Grand totals close the last section rather than opening a sheet of their
+  // own: a page containing one row reads as a mistake, and the workbook does
+  // not print one.
+  const last = sections[sections.length - 1];
+  last.rows.push({ kind: 'blank' });
+  last.rows.push({ ...view.grand, kind: 'grand', description: 'GRAND TOTALS', itemNo: '' });
+  return sections;
 }
 
 // ---------------------------------------------------------------------------
@@ -250,250 +288,257 @@ function continuationRows(view) {
 
 function drawG702(ctx, { view, project, pageCount }) {
   const { payApp, commitment, summary } = view;
-  const { text, line, box, vline } = ctx;
-  let y = SHEET.height - MARGIN - 6;
+  const { text, line, box } = ctx;
+  const L = TABLE_L;
+  const R = TABLE_R;
 
-  text('APPLICATION AND CERTIFICATE FOR PAYMENT', MARGIN, y, { size: 11, font: ctx.bold });
-  text('DOCUMENT G702', SHEET.width / 2 + 60, y, { size: 9, font: ctx.bold, align: 'center' });
-  text(`Page 1 of ${pageCount}`, RIGHT, y, { size: 9, align: 'right' });
-  y -= 6;
-  line(MARGIN, y, RIGHT, 0.9, RULE);
-  y -= 14;
+  let y = SHEET.height - 26;
+  text('APPLICATION AND CERTIFICATE FOR PAYMENT', L, y, { size: 10.5, font: ctx.bold });
+  text('DOCUMENT G702', SHEET.width / 2 + 60, y, { size: 9, font: ctx.italic, align: 'center' });
+  text(`Page 1 of ${pageCount}`, R, y, { size: 8, align: 'right' });
+  y -= 7;
+  line(L, y, R, 1.1, INK);
+  y -= 15;
 
-  const C1 = MARGIN;
-  const C2 = 280;
-  const C3 = 496;
-  const C4 = 668;
-  const label = (t, x, yy) => text(t, x, yy, { size: 7, color: GREY });
-  const value = (t, x, yy, size = 8.5) => text(t, x, yy, { size, font: ctx.bold });
+  const C1 = L;
+  const C2 = 276;
+  const LABX = 594;          // right-aligned label column
+  const VALX = LABX + 6;
+  const C4 = 700;
+
+  const lab = (t, x, yy, align = 'left') => text(t, x, yy, { size: 7.5, font: ctx.bold, align });
+  const val = (t, x, yy) => text(t, x, yy, { size: 7.5 });
 
   let ly = y;
-  label('TO CONTRACTOR:', C1, ly);
-  label('PROJECT:', C2, ly);
-  label('APPLICATION NO:', C3, ly);
-  value(payApp.number, C3 + 90, ly);
-  label('DISTRIBUTION TO:', C4, ly);
+  lab('TO CONTRACTOR:', C1, ly);
+  lab('PROJECT:', C2, ly);
+  lab('APPLICATION NO:', LABX, ly, 'right');
+  val(String(payApp.number), VALX, ly);
+  lab('DISTRIBUTION TO:', C4, ly);
   ly -= 11;
-  value(commitment.contractor_name || '', C1, ly);
-  value(project.name || '', C2, ly);
-  label('INVOICE NO:', C3, ly);
-  value(payApp.invoice_no || '', C3 + 90, ly);
+  val(commitment.contractor_name || '', C1, ly);
+  val(project.name || '', C2, ly);
+  lab('INVOICE NO:', LABX, ly, 'right');
+  val(payApp.invoice_no || '', VALX, ly);
   ly -= 11;
-  text(commitment.contractor_address1 || '', C1, ly, { size: 8 });
-  text(project.address1 || '', C2, ly, { size: 8 });
-  label('PERIOD:', C3, ly);
-  value([asDate(payApp.period_start), asDate(payApp.period_end)].filter(Boolean).join(' – '), C3 + 90, ly, 8);
+  val(commitment.contractor_address1 || '', C1, ly);
+  val(project.address1 || '', C2, ly);
+  lab('PERIOD:', LABX, ly, 'right');
+  val([asDate(payApp.period_start), asDate(payApp.period_end)].filter(Boolean).join('-'), VALX, ly);
   ly -= 11;
-  text(commitment.contractor_address2 || '', C1, ly, { size: 8 });
-  text(project.address2 || '', C2, ly, { size: 8 });
-  label('SUBCONTRACT NO:', C3, ly);
-  value(commitment.number || '', C3 + 90, ly);
+  val(commitment.contractor_address2 || '', C1, ly);
+  val(project.address2 || '', C2, ly);
+  lab('SUBCONTRACT NO:', LABX, ly, 'right');
+  val(commitment.number || '', VALX, ly);
   ly -= 11;
-  label('PROJECT NO:', C3, ly);
-  value(project.name || '', C3 + 90, ly, 8);
+  lab('PROJECT NO:', LABX, ly, 'right');
+  val(project.name || '', VALX, ly);
 
-  ly -= 16;
-  label('FROM SUBCONTRACTOR:', C1, ly);
-  label('SUBCONTRACT DATE:', C2, ly);
-  value(asDate(commitment.contract_date), C2 + 88, ly, 8);
+  ly -= 14;
+  lab('FROM SUBCONTRACTOR:', C1, ly);
+  lab('SUBCONTRACT DATE:', C2, ly);
+  val(asDate(commitment.contract_date), C2 + 92, ly);
   ly -= 11;
-  value(commitment.sub_company || '', C1, ly);
+  val(commitment.sub_company || '', C1, ly);
   ly -= 11;
-  text(commitment.sub_address1 || '', C1, ly, { size: 8 });
+  val(commitment.sub_address1 || '', C1, ly);
   ly -= 11;
-  text(commitment.sub_address2 || '', C1, ly, { size: 8 });
-  ly -= 15;
-  text(`SUBCONTRACT FOR: ${commitment.title || ''}`, C1, ly, { size: 8.5, font: ctx.bold });
+  val(commitment.sub_address2 || '', C1, ly);
+  ly -= 12;
+  text(`SUBCONTRACT FOR: ${commitment.title || ''}`, C1, ly, { size: 7.5 });
 
-  y = ly - 16;
-  line(MARGIN, y, RIGHT, 0.9, RULE);
-  y -= 14;
+  ly -= 13;
+  text("SUBCONTRACTOR'S DRAW REQUEST", C1, ly, { size: 10, font: ctx.bold });
+  const certTop = ly;
+  ly -= 11;
+  text('Application is made for payment, as shown below, in connection with the Subcontract.', C1, ly, { size: 7.5 });
+  ly -= 9;
+  text('Continuation Sheet is attached.', C1, ly, { size: 7.5 });
 
-  // Left half: the draw request and the nine numbered lines.
-  const LEFT_W = 396;
-  text("SUBCONTRACTOR'S DRAW REQUEST", C1, y, { size: 9, font: ctx.bold });
-  let ry = y;
-  const certification = [
+  // Certification, right column.
+  const RCOL = 462;
+  let ry = certTop + 2;
+  for (const row of [
     "The undersigned Subcontractor certifies that to the best of the Subcontractor's knowledge,",
     'information and belief the Work covered by this Application for Payment has been',
     'completed in accordance with the Subcontract Documents, that all amounts have been paid by',
     'the Contractor for Work for which previous Certificates for Payment were issued and',
     'payments received from the Owner, and that current payment shown herein is now due.',
-  ];
-  for (const row of certification) {
-    text(row, C3 - 26, ry, { size: 7 });
-    ry -= 9;
+  ]) {
+    text(row, RCOL, ry, { size: 6.8 });
+    ry -= 9.5;
   }
 
-  y -= 11;
-  text('Application is made for payment, as shown below, in connection with the Subcontract.', C1, y, { size: 7.4, color: GREY });
-  y -= 9;
-  text('Continuation Sheet is attached.', C1, y, { size: 7.4, color: GREY });
-  y -= 18;
+  // ----- the nine numbered lines -----
+  // Each amount sits on a rule, which is what makes the form read as a form.
+  y = ly - 22;
+  const NUMX = C1 + 4;
+  const TXTX = C1 + 26;
+  // Both amount columns stop short of RCOL: the certification paragraph and
+  // the signature block own everything to the right of it.
+  const AMT_R = 438;          // right edge of the main amount column
+  const SUB_R = 366;          // right edge of the indented 5a / 5b column
+  const ruleUnder = (right, width = 96) => line(right - width, y - 2.5, right, 0.6, INK);
 
-  const amountX = C1 + LEFT_W;
-  const numbered = [
-    ['1.', 'Original Contract Sum', summary.originalContractSum, null],
-    ['2.', 'Net change by change orders', summary.netChangeByChangeOrders, null],
-    ['3.', 'Contract sum to date (Line 1 ± 2)', summary.contractSumToDate, null],
-    ['4.', 'Total completed and stored to date', summary.totalCompletedAndStored, '(Column G on G703)'],
-    ['5.', 'Retainage:', null, null],
-    ['5a', `${(Number(summary.effectiveRetainageRate || 0) * 100).toFixed(2)}% of Completed Work:`,
-      summary.retainageOnCompletedWork, null],
-    ['5b', `${(Number(commitment.materials_retainage_pct || 0) * 100).toFixed(2)}% of Stored Material:`,
-      summary.retainageOnStoredMaterial, null],
-    ['', 'Total Retainage (Lines 5a + 5b or Total in Column I of G703)', summary.totalRetainage, null],
-    ['6.', 'Total earned less retainage', summary.totalEarnedLessRetainage, '(Line 4 Less Line 5 Total)'],
-    ['7.', 'Less previous certificates for payment', summary.previousCertificates, '(Line 6 from prior certificate)'],
-    ['8.', 'Current payment due:', summary.currentPaymentDue, null],
-    ['9.', 'Balance to finish, including retainage', summary.balanceToFinishIncludingRetainage, '(Line 3 less Line 6)'],
-  ];
-
-  for (const [num, labelText, amount, note] of numbered) {
-    const isDue = num === '8.';
-    const isSub = num === '5a' || num === '5b';
-    // The highlighted line 8 band is taller than a normal row; without this it
-    // sat on top of the "(Line 6 from prior certificate)" note above it.
-    if (isDue) y -= 5;
-    if (isDue) box(C1 - 4, y - 4, LEFT_W + 12, 15, { fill: BAND, border: RULE });
-    text(num === '5a' || num === '5b' ? '' : num, C1, y, { size: isDue ? 9 : 8, font: isDue ? ctx.bold : ctx.regular });
-    text(isSub ? `${num === '5a' ? 'a.' : 'b.'}  ${labelText}` : labelText,
-      C1 + (isSub ? 26 : 16), y, { size: isDue ? 9 : 8, font: isDue ? ctx.bold : ctx.regular });
+  const row = (num, labelText, amount, note, { indent = false, rightEdge = AMT_R } = {}) => {
+    if (num) text(num, NUMX, y, { size: 7.5 });
+    text(labelText, indent ? TXTX + 22 : TXTX, y, { size: 7.5 });
     if (amount !== null && amount !== undefined) {
-      text(money(amount), isSub ? amountX - 80 : amountX, y,
-        { size: isDue ? 9 : 8, font: isDue ? ctx.bold : ctx.regular, align: 'right' });
+      text(money(amount), rightEdge - 3, y, { size: 7.5, align: 'right' });
+      ruleUnder(rightEdge);
     }
-    y -= isDue ? 17 : 11;
+    y -= 11;
     if (note) {
-      text(note, C1 + 16, y + 1, { size: 6.6, color: GREY });
-      y -= 9;
+      text(note, TXTX, y, { size: 7 });
+      y -= 10;
     }
-    // A payment made outside the applications is the one figure on this page
-    // that cannot be derived from the others. Say what it was.
-    if (num === '7.' && Number(summary.priorPaymentAdjustment) > 0) {
-      text(`includes ${money(summary.priorPaymentAdjustment)} ${payApp.prior_payment_note || 'paid outside the applications'}`,
-        C1 + 16, y + 1, { size: 6.6, color: GREY });
-      y -= 9;
-    }
+  };
+
+  row('1.', 'Original Contract Sum', summary.originalContractSum);
+  row('2.', 'Net change by change orders', summary.netChangeByChangeOrders);
+  row('3.', 'Contract sum to date (Line 1 ± 2)', summary.contractSumToDate);
+  row('4.', 'Total completed and stored to date', summary.totalCompletedAndStored, '(Column G on G703)');
+  row('5.', 'Retainage:', null, null);
+  row('a.', `${(Number(summary.effectiveRetainageRate || 0) * 100).toFixed(2)}% of Completed Work:`,
+    summary.retainageOnCompletedWork, null, { indent: true, rightEdge: SUB_R });
+  row('b.', `${(Number(commitment.materials_retainage_pct || 0) * 100).toFixed(2)}% of Stored Material:`,
+    summary.retainageOnStoredMaterial, null, { indent: true, rightEdge: SUB_R });
+  row('', 'Total Retainage (Lines 5a + 5b or Total in Column I of G703)', summary.totalRetainage);
+  row('6.', 'Total earned less retainage', summary.totalEarnedLessRetainage, '(Line 4 Less Line 5 Total)');
+  row('7.', 'Less previous certificates for payment', summary.previousCertificates, '(Line 6 from prior certificate)');
+  if (Number(summary.priorPaymentAdjustment) > 0) {
+    text(`includes ${money(summary.priorPaymentAdjustment)} ${payApp.prior_payment_note || 'paid outside the applications'}`,
+      TXTX, y + 1, { size: 6.4, color: GREY });
+    y -= 9;
   }
+  row('8.', 'Current payment due:', summary.currentPaymentDue);
+  row('9.', 'Balance to finish, including retainage', summary.balanceToFinishIncludingRetainage, '(Line 3 less Line 6)');
 
-  // Right half: signature and notary, as on the workbook.
-  let sy = ry - 14;
-  text('SUBCONTRACTOR:', C3 - 26, sy, { size: 7, color: GREY });
-  text(commitment.sub_company || '', C3 + 60, sy, { size: 8.5, font: ctx.bold });
-  sy -= 26;
-  ctx.line(C3 - 26, sy, C3 + 150, 0.8, INK);
-  if (payApp.signer_name) text(payApp.signer_name, C3 - 24, sy + 4, { size: 8.5, font: ctx.bold });
-  text('By:', C3 - 26, sy - 9, { size: 7, color: GREY });
-  ctx.line(C3 + 170, sy, RIGHT, 0.8, INK);
-  text(asDate(payApp.submitted_at) || asDate(payApp.application_date), C3 + 172, sy + 4, { size: 8.5 });
-  text('Date:', C3 + 170, sy - 9, { size: 7, color: GREY });
-  sy -= 26;
-  text('State of:', C3 - 26, sy, { size: 7.6 });
-  ctx.line(C3 + 10, sy - 2, C3 + 150, 0.6, RULE);
-  sy -= 13;
-  text('County of:', C3 - 26, sy, { size: 7.6 });
-  ctx.line(C3 + 10, sy - 2, C3 + 150, 0.6, RULE);
-  sy -= 15;
-  text('Subscribed and sworn to before', C3 - 26, sy, { size: 7.6 });
-  sy -= 11;
-  text('me this', C3 - 26, sy, { size: 7.6 });
-  ctx.line(C3 + 8, sy - 2, C3 + 90, 0.6, RULE);
-  text('day of', C3 + 96, sy, { size: 7.6 });
-  ctx.line(C3 + 124, sy - 2, RIGHT, 0.6, RULE);
+  // ----- signature and notary, right column -----
+  let sy = ry - 12;
+  text('SUBCONTRACTOR:', RCOL, sy, { size: 7.5, font: ctx.bold });
+  text(commitment.sub_company || '', RCOL + 92, sy, { size: 7.5 });
   sy -= 22;
-  text('Notary Public:', C3 - 26, sy, { size: 7.6 });
-  ctx.line(C3 + 30, sy - 2, RIGHT, 0.6, RULE);
+  text('By:', RCOL, sy, { size: 7.5 });
+  line(RCOL + 18, sy - 2.5, RCOL + 200, 0.6, INK);
+  if (payApp.signer_name) text(payApp.signer_name, RCOL + 22, sy, { size: 7.5 });
+  text('Date:', RCOL + 212, sy, { size: 7.5 });
+  line(RCOL + 240, sy - 2.5, R, 0.6, INK);
+  text(asDate(payApp.submitted_at) || asDate(payApp.application_date), RCOL + 244, sy, { size: 7.5 });
   sy -= 15;
-  text('My Commission expires:', C3 - 26, sy, { size: 7.6 });
-  ctx.line(C3 + 70, sy - 2, RIGHT, 0.6, RULE);
+  text('State of:', RCOL, sy, { size: 7.5 });
+  line(RCOL + 36, sy - 2.5, RCOL + 200, 0.6, INK);
+  sy -= 13;
+  text('County of:', RCOL, sy, { size: 7.5 });
+  line(RCOL + 44, sy - 2.5, RCOL + 200, 0.6, INK);
+  sy -= 13;
+  text('Subscribed and sworn to before', RCOL, sy, { size: 7.5 });
+  sy -= 12;
+  text('me this', RCOL, sy, { size: 7.5 });
+  line(RCOL + 30, sy - 2.5, RCOL + 120, 0.6, INK);
+  text('day of', RCOL + 126, sy, { size: 7.5 });
+  line(RCOL + 156, sy - 2.5, R, 0.6, INK);
+  sy -= 18;
+  text('Notary Public:', RCOL, sy, { size: 7.5 });
+  line(RCOL + 54, sy - 2.5, R, 0.6, INK);
+  sy -= 15;
+  text('My Commission expires:', RCOL, sy, { size: 7.5 });
+  line(RCOL + 92, sy - 2.5, R, 0.6, INK);
 
-  // Change order summary, bottom left.
+  // ----- change order summary, a bordered table -----
   const co = view.changeOrderSummary || {};
-  let cy = Math.min(y, sy) - 18;
-  if (cy < 96) cy = 96;
-  const COLA = C1 + 210;
-  const COLB = C1 + 320;
-  text('CHANGE ORDER SUMMARY', C1 + 16, cy, { size: 8, font: ctx.bold });
-  text('ADDITIONS', COLA, cy, { size: 7.4, font: ctx.bold, align: 'right' });
-  text('DEDUCTIONS', COLB, cy, { size: 7.4, font: ctx.bold, align: 'right' });
-  cy -= 4;
-  line(C1, cy, COLB + 10, 0.7, RULE);
-  cy -= 11;
-  text('Total changes approved', C1 + 16, cy, { size: 7.4 });
-  text(money(co.approvedPreviousAdditions || 0), COLA, cy, { size: 7.4, align: 'right' });
-  text(money(co.approvedPreviousDeductions || 0), COLB, cy, { size: 7.4, align: 'right' });
-  cy -= 9;
-  text('in previous months by Owner:', C1 + 16, cy, { size: 7.4 });
-  cy -= 12;
-  text('Total approved this Month:', C1 + 16, cy, { size: 7.4 });
-  text(money(co.approvedThisMonthAdditions || 0), COLA, cy, { size: 7.4, align: 'right' });
-  text(money(co.approvedThisMonthDeductions || 0), COLB, cy, { size: 7.4, align: 'right' });
-  cy -= 4;
-  line(C1 + 140, cy, COLB + 10, 0.7, RULE);
-  cy -= 11;
-  text('Totals:', COLA - 80, cy, { size: 7.4, font: ctx.bold });
-  text(money((co.approvedPreviousAdditions || 0) + (co.approvedThisMonthAdditions || 0)), COLA, cy,
-    { size: 7.4, font: ctx.bold, align: 'right' });
-  text(money((co.approvedPreviousDeductions || 0) + (co.approvedThisMonthDeductions || 0)), COLB, cy,
-    { size: 7.4, font: ctx.bold, align: 'right' });
-  cy -= 12;
-  text('Net change by change orders:', C1 + 16, cy, { size: 7.4, font: ctx.bold });
-  text(money(view.summary.netChangeByChangeOrders), COLA, cy, { size: 7.4, font: ctx.bold, align: 'right' });
+  const boxTop = Math.min(y, sy) - 24;
+  const X0 = C1 + 22;
+  const X1 = X0 + 250;
+  const X2 = X1 + 108;
+  const X3 = X2 + 108;
+  const rows = [
+    ['Total changes approved', money(co.approvedPreviousAdditions || 0), money(co.approvedPreviousDeductions || 0), 'in previous months by Owner:'],
+    ['Total approved this Month:', money(co.approvedThisMonthAdditions || 0), money(co.approvedThisMonthDeductions || 0), null],
+  ];
+  const H_HEAD = 13;
+  const H_TALL = 20;
+  const H_ONE = 13;
+  const totalH = H_HEAD + H_TALL + H_ONE + H_ONE + H_ONE;
+  let by = boxTop;
+
+  const bandRow = (height, cells, { bold = false, secondLine = null } = {}) => {
+    const top = by;
+    const bottom = by - height;
+    box(X0, bottom, X3 - X0, height, { border: INK, width: 0.7 });
+    ctx.vline(X1, bottom, top, 0.7, INK);
+    ctx.vline(X2, bottom, top, 0.7, INK);
+    const f = bold ? ctx.bold : ctx.regular;
+    if (cells[0]) text(cells[0], X0 + 4, bottom + height - 9, { size: 7, font: f });
+    if (secondLine) text(secondLine, X0 + 4, bottom + 3.5, { size: 7, font: f });
+    if (cells[1]) text(cells[1], X2 - 4, bottom + height - 9, { size: 7, font: f, align: 'right' });
+    if (cells[2]) text(cells[2], X3 - 4, bottom + height - 9, { size: 7, font: f, align: 'right' });
+    by = bottom;
+  };
+
+  // Header row, centred.
+  box(X0, by - H_HEAD, X3 - X0, H_HEAD, { border: INK, width: 0.7 });
+  ctx.vline(X1, by - H_HEAD, by, 0.7, INK);
+  ctx.vline(X2, by - H_HEAD, by, 0.7, INK);
+  text('CHANGE ORDER SUMMARY', (X0 + X1) / 2, by - 9, { size: 7, font: ctx.bold, align: 'center' });
+  text('ADDITIONS', (X1 + X2) / 2, by - 9, { size: 7, font: ctx.bold, align: 'center' });
+  text('DEDUCTIONS', (X2 + X3) / 2, by - 9, { size: 7, font: ctx.bold, align: 'center' });
+  by -= H_HEAD;
+
+  bandRow(H_TALL, rows[0].slice(0, 3), { secondLine: rows[0][3] });
+  bandRow(H_ONE, rows[1].slice(0, 3));
+  bandRow(H_ONE, ['', money((co.approvedPreviousAdditions || 0) + (co.approvedThisMonthAdditions || 0)),
+    money((co.approvedPreviousDeductions || 0) + (co.approvedThisMonthDeductions || 0))], { bold: true });
+  text('Totals:', X1 - 4, by + H_ONE - 9, { size: 7, font: ctx.bold, align: 'right' });
+  bandRow(H_ONE, ['Net change by change orders:', money(summary.netChangeByChangeOrders), ''], { bold: true });
 }
 
 // ---------------------------------------------------------------------------
 // Composition
 // ---------------------------------------------------------------------------
 
-function paginate(rows, capacity) {
-  const pages = [];
-  let current = [];
-  for (const row of rows) {
-    if (current.length >= capacity) {
-      pages.push(current);
-      current = [];
-    }
-    current.push(row);
-  }
-  if (current.length) pages.push(current);
-  return pages;
-}
-
 function drawApplication(doc, view, project) {
-  const { pdf, regular, bold, logo, page } = doc;
-  const rows = continuationRows(view);
+  const { regular, bold, italic, page } = doc;
+  const sections = continuationSections(view);
 
-  // Body height available under the sheet header and the column band.
-  const bodyTop = SHEET.height - MARGIN - 8 - 38 - 8 - HEADER_H - 13;
-  const capacity = Math.floor((bodyTop - MARGIN - 18) / ROW_H);
-  const sheets = paginate(rows, capacity);
+  // How many body rows fit under the sheet header and the column band.
+  const probeTop = SHEET.height - 26 - 12 - 27 - 14 - 9;
+  const bodyTop = probeTop - LETTER_H - HEAD_H;
+  const capacity = Math.max(6, Math.floor((bodyTop - 26) / ROW_H));
+
+  // Sections do not share a sheet; each starts a new one, as the workbook
+  // prints them, so a TOTALS line is never orphaned from its block.
+  const sheets = [];
+  for (const section of sections) {
+    for (let i = 0; i < section.rows.length; i += capacity) {
+      sheets.push({ label: section.label, rows: section.rows.slice(i, i + capacity) });
+    }
+  }
   const pageCount = 1 + sheets.length;
 
-  const ctxOf = (p) => Object.assign(p, { regular, bold });
-
+  const ctxOf = (p) => Object.assign(p, { regular, bold, italic });
   drawG702(ctxOf(page()), { view, project, pageCount });
 
-  sheets.forEach((sheetRows, i) => {
+  sheets.forEach((sheet, i) => {
     const ctx = ctxOf(page());
-    const afterHeader = sheetHeader(ctx, {
+    const top = sheetHeader(ctx, {
       pageNumber: i + 2,
       pageCount,
       payApp: view.payApp,
       project,
-      retainageRate: view.summary.effectiveRetainageRate,
+      sectionLabel: sheet.label,
     });
-    let y = columnHeader(ctx, afterHeader) - ROW_H;
-    for (const row of sheetRows) y = drawRow(ctx, y, row);
+    let y = columnHeader(ctx, top) - ROW_H;
+    for (const row of sheet.rows) y = drawBodyRow(ctx, y, row);
   });
 
   return pageCount;
 }
 
 function drawWaiver(doc, view, project) {
-  const { regular, bold, logo, page } = doc;
+  const { regular, bold, italic, logo, page } = doc;
   const { payApp, commitment, summary } = view;
-  const w = Object.assign(page(), { regular, bold });
+  const w = Object.assign(page(), { regular, bold, italic });
   const TEXT_W = 700;
   const LEFT = (SHEET.width - TEXT_W) / 2;
   let y = SHEET.height - MARGIN - 8;
