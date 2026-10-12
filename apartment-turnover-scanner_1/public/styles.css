@@ -84,11 +84,6 @@ html, body {
 }
 
 main { flex: 1; padding: 14px; padding-bottom: 40px; max-width: 900px; margin: 0 auto; width: 100%; }
-/* Screens whose subject is a wide table — a schedule of values, a G703 — get
-   the window instead of the reading column. Without this the billing table
-   scrolled sideways inside a 900px box on a 1500px screen, which looks like a
-   bug because it is one: the space was there and we weren't using it. */
-main.wide { max-width: 1500px; }
 
 h1 { font-size: 20px; margin: 4px 0 12px; color: var(--brand); }
 h2 { font-size: 17px; margin: 0 0 10px; }
@@ -500,7 +495,7 @@ input[type="text"], input[type="file"] {
 
 .tool-progress { font-size: 12px; font-weight: 600; color: var(--brand, #07354D); margin-top: 4px; }
 
-/* ---- Commitments & billing ---- */
+/* ---- Data tables ---- */
 table.grid { width: 100%; border-collapse: collapse; font-size: 14px; }
 table.grid th {
   text-align: left; font-size: 11px; letter-spacing: .4px; color: #6b7783;
@@ -513,24 +508,8 @@ table.grid tr.clickable { cursor: pointer; }
 table.grid tr.clickable:hover { background: #f7f9fb; }
 table.grid tfoot td { padding: 10px; border-top: 2px solid #e3e8ee; }
 table.grid .sub { font-size: 12px; color: #6b7783; margin-top: 2px; }
-table.grid tr.block-head td {
-  background: #f4f6f8; font-weight: 700; font-size: 12px; letter-spacing: .4px;
-  text-transform: uppercase; color: #48555f;
-}
-table.grid tr.block-total td { border-top: 1px solid #d9e0e7; background: #fcfdfe; }
-.scroll-x { overflow-x: auto; }
 /* Wide enough that nothing collides, narrow enough to fit a laptop without
    scrolling. Below this it does scroll, which is right on a phone. */
-table.payapp { min-width: 1060px; }
-/* A cost code and a line description should each sit on one line — a wrapped
-   "09-990 (S)" reads as three different codes at a glance. */
-table.payapp td:first-child, table.payapp th:first-child { white-space: nowrap; }
-table.payapp td:nth-child(2) { min-width: 210px; }
-input.cell {
-  width: 92px; padding: 5px 7px; font-size: 14px; text-align: right;
-  border: 1px solid #d3dae1; border-radius: 6px; font-variant-numeric: tabular-nums;
-}
-input.cell:focus { outline: 2px solid var(--brand); outline-offset: -1px; }
 .field-grid { display: flex; flex-wrap: wrap; gap: 12px; }
 .field-grid label, .card > label {
   display: flex; flex-direction: column; flex: 1; min-width: 190px;
@@ -541,28 +520,15 @@ input.cell:focus { outline: 2px solid var(--brand); outline-offset: -1px; }
   border-radius: 8px; font-family: inherit; font-weight: 400; color: #0b1f2a;
 }
 .card textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
-.pill {
-  display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: .5px;
-  padding: 3px 7px; border-radius: 999px; background: #eef1f4; color: #48555f;
-}
-.pill.approved { background: #e8f6ed; color: #15683a; }
-.pill.pending, .pill.open { background: #fdf3e2; color: #8a5a12; }
-.pill.submitted { background: #e7effa; color: #1c4f86; }
-.pill.rejected, .pill.revise { background: #fdecec; color: #a11b1b; }
-.pill.edited { background: #f3e8fd; color: #6b2fa1; }
 button.small { padding: 5px 9px; font-size: 12px; }
 .link-card code.link {
   display: block; margin-top: 10px; padding: 10px 12px; background: #f4f6f8;
   border-radius: 8px; font-size: 12px; word-break: break-all; color: #07354D;
 }
-table.summary { width: 100%; max-width: 560px; border-collapse: collapse; font-size: 14px; }
-table.summary td { padding: 7px 4px; border-bottom: 1px solid #f0f3f6; }
-table.summary td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
-table.summary tr.due td { font-weight: 700; font-size: 16px; border-top: 2px solid #d9e0e7; border-bottom: none; }
 .preview { margin-top: 14px; padding: 14px; background: #f7f9fb; border: 1px solid #e3e8ee; border-radius: 10px; }
 input[type="file"] { font-size: 14px; margin-top: 8px; }
 
-/* ---- Tabs inside a commitment ---- */
+/* ---- Tabs ---- */
 .tabs { display: flex; gap: 4px; margin: 16px 0 0; border-bottom: 1px solid #e3e8ee; }
 .tab {
   background: none; border: none; border-bottom: 2px solid transparent;
@@ -574,9 +540,6 @@ input[type="file"] { font-size: 14px; margin-top: 8px; }
 .attachment { padding: 9px 0; border-bottom: 1px solid #f0f3f6; }
 .attachment:last-child { border-bottom: none; }
 .attachment a { color: var(--brand); font-weight: 600; text-decoration: none; word-break: break-all; }
-input.co-line { width: 100%; padding: 7px 8px; font-size: 14px; border: 1px solid #d3dae1; border-radius: 6px; font-family: inherit; }
-input.co-line.wide { min-width: 220px; }
-input.co-line:disabled { background: #f7f9fb; color: #48555f; }
 .menu-actions { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
 .menu-actions button { width: 100%; text-align: left; padding: 12px 14px; }
 button.danger-quiet {
@@ -584,13 +547,4 @@ button.danger-quiet {
   font-family: inherit; font-size: 14px; font-weight: 600; border-radius: 8px; cursor: pointer;
 }
 button.danger-quiet:hover { background: #fdf5f5; }
-.danger-zone { border-color: #f0dede; background: #fffbfb; }
-.danger-zone .help { max-width: 560px; margin-top: 3px; }
 
-/* A quiet inline action inside a table cell — present, never shouting. */
-button.link-quiet {
-  background: none; border: 0; padding: 0 0 0 6px;
-  font-family: inherit; font-size: 11px; font-weight: 600;
-  color: #8a949c; cursor: pointer; text-decoration: underline;
-}
-button.link-quiet:hover { color: #a11b1b; }
