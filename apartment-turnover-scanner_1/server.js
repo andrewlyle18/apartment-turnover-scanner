@@ -4,8 +4,6 @@ const path = require('path');
 const XLSX = require('xlsx');
 const { pool, initSchema } = require('./db');
 const { initAuth, attachUser, requireAuth, adminOnly, mountAuthRoutes, ENFORCED } = require('./auth');
-const { initBilling } = require('./billing');
-const { mountBillingRoutes } = require('./billing-routes');
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
@@ -32,16 +30,9 @@ mountAuthRoutes(app);
 // them, so a route added later can't accidentally be left open.
 app.use('/api', (req, res, next) => {
   if (!ENFORCED()) return next();
-  // /bill/ is the subcontractor's own page: the token in their link is the
-  // credential, and it reaches exactly one pay application. They have no
-  // account here and never will.
-  if (req.path.startsWith('/auth/') || req.path.startsWith('/bill/') || req.path === '/health') return next();
+  if (req.path.startsWith('/auth/') || req.path === '/health') return next();
   return requireAuth(req, res, next);
 });
-
-// Commitments, change orders and pay applications. Administrators only,
-// apart from the token routes inside.
-mountBillingRoutes(app, { adminOnly, upload });
 
 // ---------- Projects ----------
 async function loadProjectsWithStats(whereClause) {
@@ -101,34 +92,13 @@ app.post('/api/projects', adminOnly, async (req, res) => {
 
 app.get('/api/projects/:id', async (req, res) => {
   const result = await pool.query(
-    'SELECT id, name, address1, address2, owner_name, created_at, trashed_at FROM projects WHERE id = $1', [req.params.id]);
+    'SELECT id, name, created_at, trashed_at FROM projects WHERE id = $1', [req.params.id]);
   if (!result.rows.length) return res.status(404).json({ error: 'Project not found' });
   res.json({ project: result.rows[0] });
 });
 
 app.patch('/api/projects/:id', adminOnly, async (req, res) => {
   const body = req.body || {};
-
-  // The job's address, which the change order document prints. Set from the
-  // billing screens; it isn't part of scanning.
-  if (body.name === undefined && (body.address1 !== undefined || body.address2 !== undefined || body.ownerName !== undefined)) {
-    const updated = await pool.query(
-      `UPDATE projects SET
-         address1 = COALESCE($1, address1),
-         address2 = COALESCE($2, address2),
-         owner_name = COALESCE($3, owner_name)
-       WHERE id = $4
-       RETURNING id, name, address1, address2, owner_name, created_at`,
-      [
-        body.address1 === undefined ? null : String(body.address1 || '').trim() || null,
-        body.address2 === undefined ? null : String(body.address2 || '').trim() || null,
-        body.ownerName === undefined ? null : String(body.ownerName || '').trim() || null,
-        req.params.id,
-      ]
-    );
-    if (!updated.rows.length) return res.status(404).json({ error: 'Project not found' });
-    return res.json({ project: updated.rows[0] });
-  }
 
   const name = String(body.name || '').trim();
   if (!name) return res.status(400).json({ error: 'Project name is required' });
@@ -711,173 +681,12 @@ async function readWithOcrSpace(buffer) {
   return { text: parsed.ParsedText || '', words };
 }
 
-// ---------- Reading a schedule of values out of a spreadsheet ----------
-// Subcontract SOVs arrive as a G703, an estimate export, or something
-// somebody built by hand. Rather than demand a template, find the columns.
-
-const HEADER_HINTS = {
-  description: [/description/i, /scope/i, /item description/i, /work/i],
-  value: [/scheduled\s*value/i, /contract\s*(value|amount)/i, /^value$/i, /^amount$/i, /^total$/i, /sched/i],
-  itemNo: [/item\s*(no|num|#)/i, /cost\s*code/i, /^code$/i, /^item$/i, /budget\s*code/i],
-};
-
-const looksLikeMoney = (value) => {
-  if (typeof value === 'number') return isFinite(value);
-  if (typeof value !== 'string') return false;
-  const cleaned = value.replace(/[$,\s]/g, '');
-  return cleaned !== '' && isFinite(Number(cleaned));
-};
-
-const asNumber = (value) => {
-  if (typeof value === 'number') return value;
-  const n = Number(String(value || '').replace(/[$,\s]/g, ''));
-  return isFinite(n) ? n : null;
-};
-
-const SKIP_ROW = [
-  /^total/i, /^grand\s*total/i, /^sub\s*total/i, /^continuation/i,
-  /^document\s*g70/i, /^description of work$/i, /^application/i,
-];
-
-// Change-order lines live in their own block on a G703 and are NOT part of
-// the base schedule — they belong to the change orders, which carry their own
-// approval and their own retainage. Two ways to spot them: the block heading,
-// or a line that names itself.
-const CHANGE_ORDER_SECTION = /whole\s*change\s*order|change\s*order\s*packages/i;
-const CHANGE_ORDER_LINE = /^(c\.?\s*o\.?|change\s*order)\s*#?\s*\d/i;
-
-/**
- * Finds the header row and the three columns that matter, then reads every
- * line below it. Returns the lines plus what was skipped and why, so the
- * person importing can see whether it understood the file.
- */
-function readScheduleOfValues(sheet) {
-  const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: true, raw: true });
-
-  let headerRow = -1;
-  let cols = null;
-  for (let r = 0; r < Math.min(rows.length, 40); r++) {
-    const row = (rows[r] || []).map((c) => String(c === undefined || c === null ? '' : c).trim());
-    const find = (hints) => row.findIndex((cell) => cell && hints.some((re) => re.test(cell)));
-    const description = find(HEADER_HINTS.description);
-    const value = find(HEADER_HINTS.value);
-    if (description >= 0 && value >= 0 && description !== value) {
-      const itemNo = find(HEADER_HINTS.itemNo);
-      headerRow = r;
-      cols = { itemNo: itemNo >= 0 && itemNo !== description && itemNo !== value ? itemNo : null, description, value };
-      break;
-    }
-  }
-
-  // No recognisable header: fall back to the shape of the data — the first
-  // column with words, the last column with money.
-  if (!cols) {
-    for (let r = 0; r < Math.min(rows.length, 40); r++) {
-      const row = rows[r] || [];
-      const textCol = row.findIndex((c) => typeof c === 'string' && c.trim().length > 3 && !looksLikeMoney(c));
-      const moneyCol = row.reduce((acc, c, i) => (looksLikeMoney(c) && asNumber(c) ? i : acc), -1);
-      if (textCol >= 0 && moneyCol > textCol) {
-        headerRow = r - 1;
-        cols = { itemNo: textCol > 0 ? textCol - 1 : null, description: textCol, value: moneyCol };
-        break;
-      }
-    }
-  }
-
-  if (!cols) return { lines: [], skipped: [], columns: null };
-
-  const lines = [];
-  const skipped = [];
-  let blankRun = 0;
-  let inChangeOrders = false;
-
-  for (let r = headerRow + 1; r < rows.length; r++) {
-    const row = rows[r] || [];
-    const description = String(row[cols.description] === undefined ? '' : row[cols.description]).trim();
-    const rawValue = row[cols.value];
-
-    if (!description && !looksLikeMoney(rawValue)) {
-      blankRun++;
-      // A G703 breaks across pages; a few blank rows are a page break, not
-      // the end of the schedule. Fifteen in a row is the end.
-      if (blankRun > 15) break;
-      continue;
-    }
-    blankRun = 0;
-
-    if (!description) continue;
-
-    if (CHANGE_ORDER_SECTION.test(description)) {
-      inChangeOrders = true;
-      skipped.push({ row: r + 1, description, reason: 'change order block' });
-      continue;
-    }
-    if (inChangeOrders || CHANGE_ORDER_LINE.test(description)) {
-      if (looksLikeMoney(rawValue)) {
-        skipped.push({ row: r + 1, description, reason: 'change order', amount: asNumber(rawValue) });
-      }
-      continue;
-    }
-    if (SKIP_ROW.some((re) => re.test(description))) {
-      skipped.push({ row: r + 1, description, reason: 'heading or total' });
-      continue;
-    }
-    const scheduledValue = asNumber(rawValue);
-    if (scheduledValue === null) {
-      skipped.push({ row: r + 1, description, reason: 'no value' });
-      continue;
-    }
-
-    lines.push({
-      itemNo: cols.itemNo === null ? '' : String(row[cols.itemNo] === undefined ? '' : row[cols.itemNo]).trim(),
-      description,
-      scheduledValue: Math.round(scheduledValue * 100) / 100,
-    });
-  }
-
-  return { lines, skipped, columns: cols, headerRow: headerRow + 1 };
-}
-
-// Reads the file and hands back what it found. Saves nothing — the person
-// importing sees the lines and the total first, then presses Save.
-app.post('/api/commitments/:id/sov/preview', adminOnly, upload.single('file'), async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'No file received' });
-  let workbook;
-  try {
-    workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
-  } catch (err) {
-    return res.status(400).json({ error: "That file couldn't be read as a spreadsheet." });
-  }
-
-  // Prefer a sheet that looks like a continuation sheet or an SOV.
-  const preferred = workbook.SheetNames.find((n) => /g703|sov|schedule/i.test(n));
-  const order = preferred ? [preferred, ...workbook.SheetNames.filter((n) => n !== preferred)] : workbook.SheetNames;
-
-  let best = { lines: [], skipped: [], sheetName: null };
-  for (const name of order) {
-    const found = readScheduleOfValues(workbook.Sheets[name]);
-    if (found.lines.length > best.lines.length) best = { ...found, sheetName: name };
-    if (preferred && name === preferred && found.lines.length) break;
-  }
-
-  if (!best.lines.length) {
-    return res.status(422).json({
-      error: "Couldn't find a schedule of values in that file. It needs a description column and a value column — any column headings will do.",
-      sheets: workbook.SheetNames,
-    });
-  }
-
-  const total = best.lines.reduce((sum, l) => sum + Math.round(l.scheduledValue * 100), 0) / 100;
-  res.json({ sheetName: best.sheetName, lines: best.lines, skipped: best.skipped, total });
-});
-
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 
 const PORT = process.env.PORT || 3000;
 
 initSchema()
   .then(() => initAuth())
-  .then(() => initBilling())
   .then(() => {
     console.log(`[auth] Sign-in enforcement is ${ENFORCED() ? 'ON' : 'OFF'}`);
     app.listen(PORT, () => console.log(`Appliance scanner listening on :${PORT}`));
